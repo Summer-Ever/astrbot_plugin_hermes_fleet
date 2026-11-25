@@ -22,16 +22,15 @@
 
 ## 安装
 
-把仓库放进 AstrBot 插件目录（或在 WebUI 的插件市场里填仓库地址）：
+**推荐走面板**：插件 → 安装 → 填仓库地址
+`https://github.com/Summer-Ever/astrbot_plugin_hermes_fleet`。装完立刻可用，不用重启，
+插件列表、配置页、更新来源都会自动登记。
 
-```bash
-cd <AstrBot>/data/plugins
-git clone https://github.com/Summer-Ever/astrbot_plugin_hermes_fleet.git
-```
+手工 `git clone` 到 `data/plugins/` 也能跑，但面板不会登记它（列表里看不到、没有配置页、
+没有更新来源），且要重启后端。两种方式的差异见 `docs/08-本地部署记录.md`。
 
-重启 AstrBot。**零第三方依赖**，不需要 pip 装任何东西。
-
-要求 Python ≥ 3.11（用到 `X | None` 语法）与带 FTS5 的 SQLite（标准库自带）。
+**零第三方依赖**，不需要 pip 装任何东西。要求 Python ≥ 3.11（用到 `X | None` 语法）
+与带 FTS5 的 SQLite（标准库自带）。
 
 ## 配置
 
