@@ -15,6 +15,7 @@ from .registry import (
     normalize_note,
 )
 from .service import BLOCK_LABELS, INJECT_HEADER, MAINT_NOTES, MemoryService, Scene
+from .resident import INJECT_LABELS, direction_advice
 
 __all__ = [
     "admin",
@@ -31,5 +32,7 @@ __all__ = [
     "Scene",
     "BLOCK_LABELS",
     "INJECT_HEADER",
+    "INJECT_LABELS",
     "MAINT_NOTES",
+    "direction_advice",
 ]

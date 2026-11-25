@@ -32,12 +32,31 @@ from hermes_contracts import ResidentBlock
 
 # 六词条的中文标签。放在这里而不是契约层：它是「给模型看的措辞」，
 # 属于产品文案，会随运营口味调，不该让契约包跟着改版本。
+#
+# 这一份只用于界面与工具参数（短、好认）。**不要拿它做注入**：见下面的
+# `INJECT_LABELS`——「称呼：阿明」在上下文里是可以被读成「我叫阿明」的。
 BLOCK_LABELS: dict[ResidentBlock, str] = {
     ResidentBlock.ADDRESS: "称呼",
     ResidentBlock.ASSISTANT: "助手设定",
     ResidentBlock.USER: "用户信息",
     ResidentBlock.PREFERENCE: "偏好与忌讳",
     ResidentBlock.STYLE: "回复风格",
+    ResidentBlock.RULES: "规则与避雷",
+}
+
+# 注入用标签：每条都带主语，让「这是谁的信息」不需要靠猜。
+#
+# 为什么短标签不够：`- 称呼：阿明` 既可能是「用户希望被叫阿明」，也可能是
+# 「助手叫阿明」——词条内容由模型自己写，它完全可能把「你叫小雅」写进
+# address（那是 assistant 的活）。加上主语后，`- 怎么称呼用户：阿明` 与
+# `- 你的自我设定：自称小雅` 各自闭合成一句话，方向写在标签里，不依赖
+# 模型对六个英文字段名的记忆。
+INJECT_LABELS: dict[ResidentBlock, str] = {
+    ResidentBlock.ADDRESS: "怎么称呼用户",
+    ResidentBlock.ASSISTANT: "你的自我设定",
+    ResidentBlock.USER: "用户的客观信息",
+    ResidentBlock.PREFERENCE: "用户的偏好与忌讳",
+    ResidentBlock.STYLE: "回复风格要求",
     ResidentBlock.RULES: "规则与避雷",
 }
 
@@ -204,6 +223,57 @@ def state_change_signal(query: str) -> str:
     return ""
 
 
+# 写入方向检查用的两组信号。
+#
+# 这是**软提示**，不阻断写入：用户原话「我叫小明，叫我小明」本身就把
+# 自我介绍和称呼混在一句里，阻断会让合法内容存不进去；只在返回值里说
+# 一句「这条可能放错词条了」，模型下一轮可以自己改。
+_SELF_REF = re.compile(
+    r"我叫|我的名字|我的称呼|你叫|你的名字|你是.{0,6}(助手|机器人|bot)|"
+    r"助手叫|bot\s*叫",
+    re.I,
+)
+# 「叫我 X」类：这是 address 的信号，出现在 user/assistant 里就是放错了。
+_ADDRESS_REF = re.compile(r"以后叫我|叫我|称呼我|别叫我|不要叫我|改叫")
+
+
+def direction_advice(block: ResidentBlock | str, text: str) -> str:
+    """检查这条内容是不是放错了词条，返回一句提醒（空串 = 没问题）。
+
+    最贵的一种错位是「把助手的名字写进 address」：注入后模型会管用户叫
+    助手的名字，而这个错误在界面上看起来完全正常——两个词条都有内容，
+    只是主语反了。写的时候就提醒一句，比事后靠用户发现「你怎么管我叫小雅」
+    要便宜得多。
+    """
+    t = str(text or "")
+    if not t:
+        return ""
+    target = block if isinstance(block, ResidentBlock) else resolve_block(str(block))
+    if target is None:
+        return ""
+    if target is ResidentBlock.ADDRESS:
+        # 含「叫我 X」时说明用户确实在讲称呼，即使句子里带了「我叫」也不算错位。
+        if _SELF_REF.search(t) and not _ADDRESS_REF.search(t):
+            return (
+                "提醒：「怎么称呼用户」记的是你对用户的称呼；"
+                "你自己的名字/身份属于 assistant 词条。"
+                "如果用户原话是「我叫小明，叫我小明」，请把名字放进 user、"
+                "称呼放进 address，不要两件事混在一条里。"
+            )
+        return ""
+    if _ADDRESS_REF.search(t):
+        if target is ResidentBlock.ASSISTANT:
+            return (
+                "提醒：对用户的称呼属于 address 词条，"
+                "assistant 只放你自己的设定（名字/身份/语气）。"
+            )
+        return (
+            "提醒：「叫我 X」是对称呼的要求，属于 address 词条，"
+            "不是用户的客观信息或偏好。"
+        )
+    return ""
+
+
 def render_inject(blocks: dict[ResidentBlock, str], *, is_group: bool,
                   query: str = "", max_chars: int = MAX_INJECT_CHARS) -> str:
     """拼出每轮的注入块。常驻全空时也返回维护约定，不会是空串。
@@ -244,7 +314,7 @@ def render_inject(blocks: dict[ResidentBlock, str], *, is_group: bool,
             if limit else 0
         )
         for block, text in filled:
-            line = f"- {BLOCK_LABELS.get(block, block.value)}：{text}"
+            line = f"- {INJECT_LABELS.get(block, block.value)}：{text}"
             if limit and len(line) + 1 > budget:
                 break
             body.append(line)
@@ -261,12 +331,14 @@ __all__ = [
     "GROUP_NOTE",
     "INJECT_CLOSE",
     "INJECT_HEADER",
+    "INJECT_LABELS",
     "INJECT_OPEN",
     "INJECTION_PATTERNS",
     "MAINT_NOTES",
     "MAX_INJECT_CHARS",
     "STATE_CHANGE_WORDS",
     "clean_text",
+    "direction_advice",
     "is_injection",
     "render_inject",
     "resolve_block",

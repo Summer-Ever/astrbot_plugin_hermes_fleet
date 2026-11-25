@@ -118,7 +118,13 @@ from hermes_contracts import (  # noqa: E402
     ResidentBlock,
 )
 from hermes_contracts.errors import Unavailable  # noqa: E402
-from hermes_fleet import BLOCK_LABELS, BotRegistry, MemoryService  # noqa: E402
+from hermes_fleet import (  # noqa: E402
+    BLOCK_LABELS,
+    BotRegistry,
+    INJECT_LABELS,
+    MemoryService,
+    direction_advice,
+)
 from hermes_workers import (  # noqa: E402
     ConsolidateOutcome,
     FallbackProvider,
@@ -537,8 +543,14 @@ class HermesFleet(Star):
                                    text: str) -> str:
         """整段改写一个常驻词条（传空文本 = 清空该词条）。
 
-        常驻是六个词条的纯文本，每轮都注入：address（称呼）、assistant（助手设定）、
-        user（用户信息）、preference（偏好与忌讳）、style（回复风格）、rules（规则与避雷）。
+        常驻是六个词条的纯文本，每轮都注入。六个词条各记谁的信息，别写串：
+        - address：**你对用户的称呼**（用户希望被怎么叫），不是你的名字；
+        - assistant：**你自己的设定**（名字、身份、语气），不是用户的信息；
+        - user：用户的客观信息（年龄、城市、职业、经历）；
+        - preference：用户的喜好与忌讳；
+        - style：用户希望你用什么风格回复；
+        - rules：明确的禁止事项。
+
         本工具用新文本**整段覆盖**该词条——词条没有编号、没有「一条一条」，
         要改哪句话，就在现文基础上把那句话改掉后整段写回。
 
@@ -550,8 +562,7 @@ class HermesFleet(Star):
         词条按场景隔离：私聊改的是私聊那套，群里改的是本群那套，互不影响。
 
         Args:
-            block (string): 词条名，六选一——address/assistant/user/preference/style/rules
-                （或中文：称呼/助手设定/用户信息/偏好与忌讳/回复风格/规则与避雷）
+            block (string): 词条名，六选一——address（怎么称呼用户）/assistant（你的自我设定）/user（用户的客观信息）/preference（用户的偏好与忌讳）/style（回复风格要求）/rules（规则与避雷）。中文标签也认
             text (string): 该词条的完整新文本（整段替换，不是追加）；空文本 = 清空该词条
         """
         scene = await self.svc.scene(**self._scene_args(event))
@@ -559,14 +570,20 @@ class HermesFleet(Star):
             entry = await self.svc.set_resident(scene, str(block or ""), str(text or ""))
         except ValueError as exc:
             return str(exc)
-        label = BLOCK_LABELS.get(entry.block, entry.block.value)
+        # 回给模型的标签也用带主语的那一份：它要靠这个确认「写对了哪一格」，
+        # 回一句「已更新『称呼』」等于把歧义又还给了它。
+        label = INJECT_LABELS.get(entry.block, entry.block.value)
         where = "本群" if scene.is_group else "私聊"
         if not entry.text:
             return f"已清空{where}的「{label}」词条。"
-        return (
+        head = (
             f"已更新{where}的「{label}」词条"
             f"（{len(entry.text)}/{MAX_RESIDENT_BLOCK_CHARS} 字）：{entry.text}"
         )
+        # 方向写反了照样存（用户原话可能就混着说），但要把提醒给到模型：
+        # 它下一轮才有机会把名字与称呼拆到正确的词条里。
+        advice = direction_advice(entry.block, entry.text)
+        return f"{head}\n{advice}" if advice else head
 
     @filter.llm_tool(name="forget_memory")
     async def tool_forget_memory(self, event: AstrMessageEvent, memory_id: int) -> str:

@@ -37,6 +37,7 @@ from hermes_fleet.resident import (  # noqa: E402
     INJECT_CLOSE,
     INJECT_OPEN,
     clean_text,
+    direction_advice,
     is_injection,
     render_inject,
     resolve_block,
@@ -131,7 +132,7 @@ class RenderTest(unittest.TestCase):
             {ResidentBlock.USER: "在做客服", ResidentBlock.ADDRESS: "阿明"},
             is_group=False,
         )
-        self.assertLess(text.index("称呼"), text.index("用户信息"))
+        self.assertLess(text.index("怎么称呼用户"), text.index("用户的客观信息"))
         self.assertNotIn("偏好与忌讳", text)
 
     def test_状态变化时补一行核对指令(self) -> None:
@@ -243,6 +244,53 @@ class AdminResidentTest(unittest.IsolatedAsyncioTestCase):
             self.db, BotId("bot-a"), "u1", "private", "address", "阿明\n第二行",
         )
         self.assertEqual(row["text"], "阿明 第二行")
+
+
+class DirectionTest(unittest.TestCase):
+    """「这条记的是谁」：主语写进标签，写反了给提醒。"""
+
+    def test_注入标签带主语(self) -> None:
+        text = render_inject(
+            {
+                ResidentBlock.ADDRESS: "阿明",
+                ResidentBlock.ASSISTANT: "自称小雅，语气温柔",
+                ResidentBlock.USER: "28 岁，杭州",
+            },
+            is_group=False,
+        )
+        self.assertIn("- 怎么称呼用户：阿明", text)
+        self.assertIn("- 你的自我设定：自称小雅", text)
+        self.assertIn("- 用户的客观信息：28 岁", text)
+        # 裸标签「称呼：阿明」会被读成「我叫阿明」，不能再出现
+        self.assertNotIn("- 称呼：", text)
+
+    def test_把助手名字写进称呼会被提醒(self) -> None:
+        advice = direction_advice(ResidentBlock.ADDRESS, "你叫小雅")
+        self.assertIn("assistant", advice)
+
+    def test_正常的称呼不提醒(self) -> None:
+        self.assertEqual(direction_advice(ResidentBlock.ADDRESS, "阿明"), "")
+        self.assertEqual(direction_advice(ResidentBlock.ADDRESS, "叫他明哥"), "")
+
+    def test_自我介绍带称呼时不算错位(self) -> None:
+        """用户原话「我叫小明，叫我小明」是合法的合并写法。"""
+        self.assertEqual(
+            direction_advice(ResidentBlock.ADDRESS, "我叫小明，叫我小明"), ""
+        )
+
+    def test_称呼写进助手设定会被提醒(self) -> None:
+        advice = direction_advice(ResidentBlock.ASSISTANT, "以后叫我哥哥")
+        self.assertIn("address", advice)
+
+    def test_称呼写进用户信息会被提醒(self) -> None:
+        advice = direction_advice(ResidentBlock.USER, "以后叫我老张")
+        self.assertIn("address", advice)
+
+    def test_普通用户信息不提醒(self) -> None:
+        self.assertEqual(direction_advice(ResidentBlock.USER, "28 岁，杭州，做客服"), "")
+
+    def test_中文词条名同样生效(self) -> None:
+        self.assertIn("assistant", direction_advice("称呼", "你叫小雅"))
 
 
 class ScopeTest(_Base):
