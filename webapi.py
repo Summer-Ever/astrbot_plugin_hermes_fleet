@@ -24,6 +24,7 @@ v0.5 只有 4 个只读接口（账号盘点）。v0.6 把 hermes_core 那种「
 
 from __future__ import annotations
 
+import os
 import time
 
 from astrbot.api import logger
@@ -75,6 +76,12 @@ class FleetWebAPI:
              "未总结消息，按会话分组"),
             (f"{self.prefix}/actions/summarize", self.action_summarize, ["POST"],
              "立刻对该账号跑一轮总结"),
+            (f"{self.prefix}/memory/import", self.memory_import, ["POST"],
+             "从记忆配置文档导入常驻与归档记忆（管理员后台，不经对话）"),
+            (f"{self.prefix}/open-root", self.open_root, ["POST"],
+             "用系统文件管理器打开记忆库根目录（仅本机部署有效）"),
+            (f"{self.prefix}/backup", self.backup, ["POST"],
+             "把全部账号库一致性打包成 zip，供下载/异地保存"),
             # ---- 全局：模型链与设置 ----
             (f"{self.prefix}/models", self.models, ["GET"],
              "降级链、累计计数、最近调用日志"),
@@ -531,6 +538,149 @@ class FleetWebAPI:
             "messages": int(getattr(outcome, "messages", 0) or 0),
             "failures": int(getattr(outcome, "failures", 0) or 0),
         })
+
+    async def memory_import(self):
+        """管理员后台导入记忆配置文档（不经对话，不会被 LLM 吃掉）。
+
+        与聊天命令 `/导入记忆` 共用同一套解析 + 写入逻辑：
+        `parse_memory_config()` -> `svc.import_owner()`。差别只在入口——
+        这里是面板管理员在账号管理页选本地文件，文件内容由桥接以文本
+        传进来，所以复用的是完全相同的校验与冲突策略。
+
+        目标用户可被管理员覆盖：
+        - 不传 `owner_id`：用文档记录的来源用户（原样复原场景）；
+        - 传了 `owner_id`：导入到该账号下的指定用户（迁移场景）。
+        目标机器人账号固定为当前下钻页的 `platform_id`。
+        """
+        from hermes_fleet.export import MAX_EXPORT_BYTES, parse_memory_config
+        from hermes_fleet.settings import as_flag
+
+        if not as_flag(self._cfg("export_enabled", True), True):
+            return self._fail("记忆导入已在插件设置里关闭", 403)
+
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        if not self.plugin.registry.has_account(pid):
+            return self._fail("目标机器人账号不存在", 404)
+
+        text = str(body.get("text") or "")
+        if not text.strip():
+            return self._fail("文件内容为空")
+        if len(text.encode("utf-8")) > MAX_EXPORT_BYTES:
+            return self._fail("文件超过 100MB，拒绝导入")
+
+        try:
+            payload = parse_memory_config(text)
+        except ValueError as exc:
+            return self._fail(f"文档解析失败：{exc}")
+
+        # 管理员可覆盖目标用户；留空则用文档记录的来源用户。
+        owner = str(body.get("owner_id") or "").strip() or str(
+            payload.get("owner_id") or "").strip()
+        if not owner:
+            return self._fail("文档没有记录用户标识，请指定导入到哪个用户")
+
+        try:
+            result = await self.plugin.svc.import_owner(
+                platform_id=pid, owner_id=owner, payload=payload)
+        except ValueError as exc:
+            return self._fail(str(exc))
+        except Exception:
+            logger.error(f"[hermes_fleet] 后台导入 {pid}/{owner} 失败:\n{_tb()}")
+            return self._fail("导入失败，详见插件日志", 500)
+
+        return json_response({
+            "ok": True,
+            "platform_id": pid,
+            "owner_id": owner,
+            "doc_owner_id": payload.get("owner_id", ""),
+            "doc_bot_id": payload.get("bot_id", ""),
+            "resident_imported": result["resident_imported"],
+            "memories_imported": result["memories_imported"],
+            "message": (
+                f"导入完成：常驻 {result['resident_imported']} 条（按词条覆盖），"
+                f"归档记忆 {result['memories_imported']} 条（追加）。"
+            ),
+        })
+
+    async def open_root(self):
+        """用系统文件管理器打开记忆库根目录。
+
+        两条安全约束：
+        1. **不接受客户端传路径**——路径恒取自 `registry.root`。否则一个
+           插件后台接口就能打开服务器任意目录，等于给了文件系统浏览能力。
+        2. 只做「打开」不返回目录清单——列目录另有 overview 接口按账号做，
+           这里不提供任意路径的枚举。
+
+        只在 AstrBot 跑在本机时有意义（用户当前就是本地部署）。面板若在
+        服务器/容器里，服务端文件管理器开在远端，用户看不到，所以失败要
+        如实说清楚，不能假装成功。
+        """
+        import platform
+        import subprocess
+
+        root = str(getattr(self.plugin.registry, "root", "") or "")
+        if not root or not os.path.isdir(root):
+            return self._fail("记忆库目录不存在", 404)
+
+        # which 只接受两个固定枚举，路径由服务端拼，绝不接受客户端传来的
+        # 任意子路径（否则等于把文件管理器当任意目录浏览器用）。
+        body = await self._body()
+        which = str(body.get("which") or "root")
+        if which not in ("root", "backups"):
+            return self._fail("无效的目录类型")
+        if which == "backups":
+            try:
+                data_dir = os.path.dirname(self.plugin._export_dir())
+            except Exception:
+                data_dir = os.path.dirname(root)
+            root = os.path.join(data_dir, "backups")
+            if not os.path.isdir(root):
+                return self._fail("还没有备份目录，请先点一次备份", 404)
+
+        system = platform.system()
+        try:
+            if system == "Windows":
+                os.startfile(root)  # noqa: S606 — 打开的是服务端固定目录
+            elif system == "Darwin":
+                subprocess.Popen(["open", root])
+            else:
+                subprocess.Popen(["xdg-open", root])
+        except Exception as exc:
+            logger.warning(f"[hermes_fleet] 打开库目录失败: {exc}")
+            return self._fail(
+                "无法打开文件夹：面板可能运行在服务器/容器内（此时打开的是远端 "
+                "目录），或本机没有图形界面。请手动复制下面的路径到文件管理器。", 500)
+
+        return json_response({"ok": True, "path": root, "system": system})
+
+    async def backup(self):
+        """把全部账号库打包成 zip（一致性快照），供下载/异地保存。
+
+        真正的工作在纯逻辑模块 `hermes_fleet.backup`，这里只取服务端路径、
+        调函数、包装响应。备份目录固定在本机数据目录下，前端拿相对文件名
+        拼接下载链接——不接受客户端指定输出路径。
+        """
+        from hermes_fleet.backup import backup_bots
+
+        # 数据目录从插件自己的 _export_dir() 反推（它返回 <data>/exports），
+        # 这样 bot_db_dir 被改到别处时备份仍落在插件数据目录，不跟库目录跑。
+        try:
+            data_dir = os.path.dirname(self.plugin._export_dir())
+        except Exception:
+            data_dir = os.path.dirname(str(self.plugin.registry.root))
+        out_dir = os.path.join(data_dir, "backups")
+        try:
+            result = backup_bots(
+                root=str(self.plugin.registry.root),
+                out_dir=out_dir,
+                version=self.version,
+            )
+        except Exception:
+            logger.error(f"[hermes_fleet] 备份失败:\n{_tb()}")
+            return self._fail("备份失败，详见插件日志", 500)
+
+        return json_response(result)
 
     # ------------------------------------------------------------------ 模型
 

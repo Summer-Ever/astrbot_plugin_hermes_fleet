@@ -553,6 +553,31 @@ button, input, select { font: inherit; color: inherit; }
 .card p { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
 .result { margin-top: 10px; font-size: 12.5px; color: var(--muted); white-space: pre-wrap; }
 
+/* 导入记忆：文件选择 + 目标用户 + 按钮，窄屏也能叠放 */
+.import-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.import-form input[type="file"] {
+  font-size: 12.5px; color: var(--muted);
+  padding: 6px 8px; border: 1px dashed var(--border);
+  border-radius: 8px; background: var(--panel-2); cursor: pointer;
+}
+.import-form input[type="file"]::file-selector-button {
+  margin-right: 8px; padding: 5px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text);
+}
+
+/* 侧栏库目录/备份：小按钮 */
+.root-line { flex-wrap: wrap; }
+.mini-btn {
+  margin-left: auto; padding: 1px 7px; font-size: 11px; line-height: 1.5;
+  color: var(--accent); background: transparent; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.mini-btn:hover { border-color: var(--accent); }
+.mini-btn.wide { margin-left: 0; padding: 2px 8px; }
+#backup-result { cursor: pointer; text-decoration: underline dotted; }
+#backup-result:hover { color: var(--accent); }
+
 /* ---------------------------------------------------------------- 模型链 */
 
 .chain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

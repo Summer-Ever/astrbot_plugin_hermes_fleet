@@ -49,10 +49,11 @@ SUMMARY_PROMPT = """你是记忆管家。阅读下面的对话记录，只提炼
 - 一次性的任务指令与已完成的配置修改，除非用户明确说「以后都这样」；
 - 对用户意图的推测（「用户可能会要求做 PPT」）——只记用户已明确表达过的偏好；
 - 纯闲聊寒暄与情绪反馈；
-- 随时可从系统环境查到的易变状态、对话过程复述。
+- 随时可从系统环境查到的易变状态、对话过程复述；
+- **称呼与叫法**（「以后叫我阿明」「请称呼他老李」「怎么称呼用户」「他希望被叫作 X」）：这类只归常驻词条的 address 层管，用户直接在对话里说「以后叫我 X」时模型会自己改，归档层再存一份就是两份冲突的画像，一律不要输出。
 
 关于 owner：填这条记忆所属用户的 id，必须是本批对话里出现过的用户 id（转录里 [用户 <id>(昵称)] 的尖括号内部分）。不属于任何具体用户、而是这个群/这个场景共有的信息，omit 该字段。
-不要输出常驻词条：你产出的每一条都会进归档层，靠检索取用。"""
+不要输出常驻词条（尤其称呼）：你产出的每一条都会进归档层，靠检索取用；称呼由常驻层负责，重复记录只会让模型在不同地方看到两份画像。"""
 
 # 疑似「对模型下指令」的片段。命中就不进转录、也不写库。
 #
@@ -70,6 +71,27 @@ _INJECTION_MARKERS = (
 def is_injection(text: str) -> bool:
     low = (text or "").lower()
     return any(m in low for m in _INJECTION_MARKERS)
+
+
+# 称呼类记忆的兜底过滤。提示词已经要求模型不要输出，但模型偶尔不听话；
+# 称呼一旦进归档层，就会和常驻 address 里那份并存，检索时两条都冒出来，
+# 模型不知道该叫用户哪个。所以解析时再挡一道。
+#
+# 刻意收窄：只认明确的「称呼/叫法」表达，不放行「用户叫小明」这类客观
+# 信息（那是 profile，可能有用；而且常驻的 user 层本来也允许记名字）。
+_ADDRESS_MEMORY = re.compile(
+    r"称呼(?:用户|他|她|对方|为|作|你)|"
+    r"(?:希望|想|要|请|让|想让)(?:被)?称呼|"
+    r"怎么称呼|如何称呼|叫法|称谓|"
+    r"(?:以后|请|别|不要|改|就)(?:叫他|叫她|叫用户|叫我)|"
+    r"被称为",
+    re.I,
+)
+
+
+def is_address_memory(text: str) -> bool:
+    """这条记忆是不是在讲「怎么称呼用户」，是则不进归档层。"""
+    return bool(_ADDRESS_MEMORY.search(str(text or "")))
 
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -162,7 +184,7 @@ def parse_memories(raw: str) -> list[dict]:
         if not isinstance(item, dict):
             continue
         content = clean_text(item.get("content"), 500)
-        if not content or is_injection(content):
+        if not content or is_injection(content) or is_address_memory(content):
             continue
         kind = str(item.get("kind") or "fact").strip().lower()
         if kind not in ("fact", "preference", "profile", "summary"):

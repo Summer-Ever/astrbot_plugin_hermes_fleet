@@ -45,7 +45,13 @@
     resOwner: "",
     resScope: "private",
     loadedTabs: {},
+    importFile: null,
   };
+
+  // 单份导入文件的硬上限，与后端 MAX_EXPORT_BYTES 保持一致（100MB）。
+  // 前端先挡一道：100MB 的文本走 FileReader + JSON 桥接会很慢，
+  // 与其传到后端再被拒，不如选文件时立刻提示。
+  const IMPORT_MAX_BYTES = 100 * 1024 * 1024;
 
   // ---------------------------------------------------------------- 工具
 
@@ -576,6 +582,95 @@
     }
   }
 
+  // ---------------------------------------------------------------- 导入记忆
+
+  /** 选文件：只记住 File 对象，不读内容。真正读取在点击导入时做。
+   *  这样选错文件不会白读几十 MB，且能立刻把 100MB 超限挡在前面。 */
+  function onImportPick(e) {
+    const file = e.target.files && e.target.files[0];
+    const btn = $("btn-import");
+    const out = $("import-result");
+    st.importFile = null;
+    if (!file) {
+      btn.disabled = true;
+      btn.textContent = "选择文档后导入";
+      return;
+    }
+    if (file.size > IMPORT_MAX_BYTES) {
+      out.textContent = "文件超过 100MB，拒绝导入。";
+      e.target.value = "";
+      btn.disabled = true;
+      return;
+    }
+    st.importFile = file;
+    btn.disabled = false;
+    btn.textContent = "导入「" + file.name + "」";
+    out.textContent = "已选择 " + file.name + "（" + file.size + " 字节），点按钮确认导入。";
+  }
+
+  /** 读成 UTF-8 文本。用 FileReader 而非 file.text()，兼容老一点的浏览器。 */
+  function readAsText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("读取文件失败"));
+      reader.readAsText(file, "utf-8");
+    });
+  }
+
+  async function runImport() {
+    if (!st.importFile) { toast("请先选择记忆配置文档", true); return; }
+    const btn = $("btn-import");
+    const out = $("import-result");
+    const file = st.importFile;
+    const owner = $("import-owner").value.trim();
+    // 二次确认：常驻是整段覆盖，不可撤销，必须让管理员明确知道。
+    if (!confirm("把「" + file.name + "」导入到账号 " + st.pid +
+                 "？\n\n常驻记忆会按词条整段覆盖，归档记忆会追加。" +
+                 (owner ? "\n目标用户：" + owner : "\n目标用户：文档记录的原始用户"))) {
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "读取中…";
+    out.textContent = "正在读取文件…";
+    let text;
+    try {
+      text = await readAsText(file);
+    } catch (err) {
+      out.textContent = "读取失败：" + errMsg(err);
+      toast("读取文件失败：" + errMsg(err), true);
+      btn.disabled = false;
+      btn.textContent = "导入「" + file.name + "」";
+      return;
+    }
+    if (new Blob([text]).size > IMPORT_MAX_BYTES) {
+      out.textContent = "文本超过 100MB，拒绝导入。";
+      btn.disabled = false;
+      btn.textContent = "导入「" + file.name + "」";
+      return;
+    }
+    btn.textContent = "导入中…";
+    out.textContent = "正在写入记忆库…";
+    try {
+      const d = await apiPost("memory/import", {
+        platform_id: st.pid,
+        owner_id: owner,
+        text: text,
+      });
+      out.textContent = d.message || "导入完成。";
+      toast("记忆已导入");
+      // 导入后刷新：作用域条数、记忆列表都可能变了。
+      await loadScopes();
+      if (st.scope) await loadMemories(true);
+    } catch (err) {
+      out.textContent = "导入失败：" + errMsg(err);
+      toast("导入失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "导入「" + file.name + "」";
+    }
+  }
+
   // ---------------------------------------------------------------- tab
 
   function switchTab(name) {
@@ -610,7 +705,13 @@
       st.loadedTabs = {};
       st.resOwner = "";
       st.resScope = "private";
+      st.importFile = null;
       $("mem-q").value = "";
+      $("import-file").value = "";
+      $("import-owner").value = "";
+      $("import-result").textContent = "";
+      $("btn-import").disabled = true;
+      $("btn-import").textContent = "选择文档后导入";
       clear($("mem-list"));
       renderHead();
       renderMemories();
@@ -645,6 +746,8 @@
     $("btn-res-save").addEventListener("click", saveResident);
     $("btn-msg").addEventListener("click", loadMessages);
     $("btn-summarize").addEventListener("click", runSummarize);
+    $("import-file").addEventListener("change", onImportPick);
+    $("btn-import").addEventListener("click", runImport);
 
     // 备注就在标题上改：改完不用回列表确认，标题当场变。
     $("d-note-edit").addEventListener("click", () => {

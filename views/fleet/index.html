@@ -35,7 +35,16 @@
 
       <div class="side-foot">
         <div class="line"><span>版本</span><b id="s-version">—</b></div>
-        <div class="line"><span>库目录</span><b id="s-root" class="ellipsis" title="">—</b></div>
+        <div class="line root-line">
+          <span>库目录</span>
+          <b id="s-root" class="ellipsis" title="">—</b>
+          <button class="mini-btn" id="btn-open-root" title="用系统文件管理器打开库目录（仅本机部署有效）">打开</button>
+        </div>
+        <div class="line">
+          <span>备份</span>
+          <button class="mini-btn wide" id="btn-backup" title="把所有账号库打成一致性 zip，请另存到插件目录之外">备份全部记忆</button>
+        </div>
+        <div class="line" id="backup-result-line" hidden><span id="backup-result" class="dim small"></span></div>
       </div>
     </aside>
 
@@ -182,6 +191,17 @@
               <p>把该账号攒下的消息跑一轮总结，不必等后台 15 分钟一轮。</p>
               <button class="btn primary" id="btn-summarize">开始总结</button>
               <div class="result" id="summarize-result"></div>
+            </div>
+            <div class="card">
+              <h3>导入记忆</h3>
+              <p>选一份「记忆配置」文档（hermes-memory-*.md），把常驻与归档记忆写回本账号。常驻按词条覆盖，归档记忆追加。导入不经对话，机器人不会把它当成聊天内容。</p>
+              <div class="import-form">
+                <input type="file" id="import-file" accept=".md,.markdown,.txt,text/markdown,text/plain" />
+                <input class="input" id="import-owner" type="text" placeholder="导入到用户 ID（留空＝文档记录的用户）" />
+                <button class="btn primary" id="btn-import">选择文档后导入</button>
+              </div>
+              <div class="hint">可指定导入到账号下的某个用户；留空则导入到文档里记录的原始用户，复原其记忆。</div>
+              <div class="result" id="import-result"></div>
             </div>
             <div class="card">
               <h3>账号信息</h3>

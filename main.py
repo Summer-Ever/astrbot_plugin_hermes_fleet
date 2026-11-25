@@ -123,9 +123,12 @@ from hermes_fleet import (  # noqa: E402
     BLOCK_LABELS,
     BotRegistry,
     INJECT_LABELS,
+    INJECT_OPEN,
     MemoryService,
     append_system_prompt,
     direction_advice,
+    has_inject_block,
+    render_help,
 )
 from hermes_fleet.settings import as_flag  # noqa: E402
 from hermes_workers import (  # noqa: E402
@@ -501,6 +504,17 @@ class HermesFleet(Star):
         默认取前者，因为常驻的本职是「提供事实」而不是「下达命令」，
         强约束需求（不许骂人、必须报价格）本来就该写在人设里。
         """
+        # 同一轮请求里只放一份。工具循环里宿主可能复用 ProviderRequest，
+        # 而 extra_user_content_parts 没有 append_system_prompt 那种幂等检查；
+        # 靠 _inject_guard 的 TTL 挡不住「query 变了但请求对象没换」的情况。
+        # 判据只看块首标记，不依赖调用方状态。
+        present = [getattr(req, "system_prompt", "")]
+        parts = getattr(req, "extra_user_content_parts", None)
+        if parts:
+            present.extend(parts)
+        if has_inject_block(present):
+            return
+
         prefer_system = as_flag(self._get_cfg("inject_to_system_prompt", False), False)
         if prefer_system and hasattr(req, "system_prompt"):
             req.system_prompt = append_system_prompt(req.system_prompt or "", block)
@@ -723,6 +737,45 @@ class HermesFleet(Star):
             "「别记着我不吃辣」，我会自己改这一套。"
         )
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("提取常驻记忆")
+    async def export_resident_prompt(self, event: AstrMessageEvent):
+        """把当前场景每轮实际注入给模型的常驻提示词原文发出来。"""
+        async for result in self._resident_prompt_flow(event):
+            yield result
+
+    @fleet.command("提取常驻记忆")
+    async def fleet_export_resident_prompt(self, event: AstrMessageEvent):
+        """同 /提取常驻记忆（命令组入口）。"""
+        async for result in self._resident_prompt_flow(event):
+            yield result
+
+    async def _resident_prompt_flow(self, event: AstrMessageEvent):
+        """导出注入块原文，不改写、不摘要。
+
+        复用 `inject_block(query="")`，看到的就是模型每轮收到的那份提示词
+        ——含数据边界声明、维护约定与闭合标记，而不是六条词条的二手摘要。
+        query 留空，避免带上只在某一轮有意义的「本轮核对」提示。
+        """
+        scene = await self.svc.scene(**self._scene_args(event))
+        block = await self.svc.inject_block(scene, "")
+        if INJECT_OPEN not in block:
+            yield event.plain_result("当前场景没有可导出的常驻记忆提示词。")
+            return
+        where = f"本群（{scene.group_id}）" if scene.is_group else "私聊"
+        yield event.plain_result(
+            f"【{where}常驻记忆提示词｜模型每轮实际收到的原文】\n{block}"
+        )
+
+    @filter.command("hc帮助")
+    async def hc_help(self, event: AstrMessageEvent):
+        """列出本插件可用的指令。"""
+        yield event.plain_result(render_help(admin=self._is_admin(event)))
+
+    @fleet.command("帮助")
+    async def fleet_help(self, event: AstrMessageEvent):
+        """同 /hc帮助（命令组入口）。"""
+        yield event.plain_result(render_help(admin=self._is_admin(event)))
 
     # ------------------------------------------------------------ 记忆导出
 

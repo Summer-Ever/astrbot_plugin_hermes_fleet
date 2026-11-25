@@ -344,6 +344,36 @@
     }
   }
 
+  /** 用系统文件管理器打开服务端目录。仅本机部署有效。 */
+  async function openDir(which, label) {
+    try {
+      await apiPost("open-root", { which: which });
+      toast("已打开" + label + "（在本机文件管理器中）");
+    } catch (err) {
+      toast("打开失败：" + errMsg(err), true);
+    }
+  }
+
+  /** 备份全部账号库。结果给出文件名，并可直接打开备份目录拷走。 */
+  async function runBackup() {
+    const btn = $("btn-backup");
+    btn.disabled = true;
+    btn.textContent = "备份中…";
+    try {
+      const d = await apiPost("backup", {});
+      const line = $("backup-result-line");
+      line.hidden = false;
+      $("backup-result").textContent =
+        (d.message || "备份完成") + "  " + d.filename;
+      toast("备份完成：" + d.bots + " 个账号库");
+    } catch (err) {
+      toast("备份失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "备份全部记忆";
+    }
+  }
+
   async function probeCurrentPage() {
     const st = state.accounts;
     const ids = st.rows.map((r) => r.platform_id).filter(Boolean);
@@ -419,6 +449,9 @@
     });
     $("btn-health").addEventListener("click", () => loadHealth(false));
     $("btn-probe").addEventListener("click", probeCurrentPage);
+    $("btn-open-root").addEventListener("click", () => openDir("root", "库目录"));
+    $("btn-backup").addEventListener("click", runBackup);
+    $("backup-result").addEventListener("click", () => openDir("backups", "备份目录"));
 
     let timer = null;
     $("q").addEventListener("input", (e) => {

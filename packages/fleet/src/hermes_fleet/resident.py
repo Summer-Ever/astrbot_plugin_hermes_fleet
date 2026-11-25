@@ -498,6 +498,24 @@ def render_inject(blocks: dict[ResidentBlock, str], *, is_group: bool,
     return "\n".join(head + body + tail)
 
 
+def has_inject_block(parts) -> bool:
+    """这批文本里是否已经有过本插件的注入块。
+
+    工具调用循环里宿主可能复用同一个 `ProviderRequest`，`on_llm_request`
+    每轮都会被调用；`extra_user_content_parts` 没有系统提示词那样的幂等
+    检查，拼两次模型就会看到两份完全一样的常驻画像。判据用块首的
+    `INJECT_OPEN` 标记，不依赖调用方记状态。
+
+    `parts` 里的元素可以是字符串，也可以是带 `.text` 的 content part
+    （AstrBot 的 `TextPart` 就是这种）——所以这里不写死类型。
+    """
+    for part in parts or ():
+        text = getattr(part, "text", part)
+        if INJECT_OPEN in str(text or ""):
+            return True
+    return False
+
+
 def append_system_prompt(system_prompt: str, block: str) -> str:
     """把注入块拼到系统提示词末尾。返回新字符串，不改入参。
 
@@ -528,6 +546,7 @@ __all__ = [
     "INJECT_HEADER",
     "INJECT_LABELS",
     "INJECT_OPEN",
+    "has_inject_block",
     "INJECTION_PATTERNS",
     "MAINT_NOTES",
     "MAX_INJECT_CHARS",

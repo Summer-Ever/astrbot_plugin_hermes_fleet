@@ -76,15 +76,18 @@ class TestExportContract(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    def test_三个配置项都在schema与设置页分组里(self) -> None:
-        for key in ("export_enabled", "export_max_messages", "export_keep_days"):
+    def test_导出配置项都在schema与设置页分组里(self) -> None:
+        for key in ("export_enabled", "export_keep_days"):
             self.assertIn(key, SCHEMA)
             self.assertIn(f'"{key}"', SETTINGS)
 
+    def test_已删除无效的条数上限配置(self) -> None:
+        # 原文全量导出，不再有「最多导多少条」的设置：留着会让人以为改了有用。
+        self.assertNotIn("export_max_messages", SCHEMA)
+        self.assertNotIn("export_max_messages", SETTINGS)
+
     def test_默认值能直接用(self) -> None:
         self.assertIs(SCHEMA["export_enabled"]["default"], True)
-        # 0 = 全量导出；用户明确要求不再按条数截断。
-        self.assertEqual(SCHEMA["export_max_messages"]["default"], 0)
         self.assertGreaterEqual(SCHEMA["export_keep_days"]["default"], 0.5)
 
     def test_两份文件分别发送且都查大小(self) -> None:
