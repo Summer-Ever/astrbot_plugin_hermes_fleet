@@ -38,7 +38,9 @@ from hermes_fleet.resident import (  # noqa: E402
     INJECT_OPEN,
     append_system_prompt,
     clean_text,
+    conflict_signal,
     direction_advice,
+    drift_note,
     is_injection,
     render_inject,
     resolve_block,
@@ -113,6 +115,82 @@ class StateSignalTest(unittest.TestCase):
         """「改成/换成」故意不收：编程场景太常见，一命中就污染指令。"""
         self.assertEqual(state_change_signal("把这段代码改成异步"), "")
         self.assertEqual(state_change_signal("今天天气不错"), "")
+
+
+class ConflictTest(unittest.TestCase):
+    """用户随口说的新信息与词条冲突时，要有人提醒模型改写。
+
+    这一层补的是「变化词」视角的漏：`我现在在深圳` 不含任何变化词，词条里
+    写着杭州，模型只会顺着寒暄，画像永久停在杭州。零成本的做法是每轮都写
+    「记得核对」——但每轮都写等于没写，模型很快学会无视。所以分两级：
+    谈到了词条里的具体信息就点名，只在带近况词时才泛泛提示。
+    """
+
+    BLOCKS = {
+        ResidentBlock.ADDRESS: "阿明",
+        ResidentBlock.USER: "28 岁，杭州，做客服",
+        ResidentBlock.PREFERENCE: "不吃香菜",
+        ResidentBlock.RULES: "别在群里发广告",
+    }
+
+    def test_提到词条里的实体就点名(self) -> None:
+        note = conflict_signal(self.BLOCKS, "我在杭州上班")
+        self.assertIn("杭州", note)
+        self.assertIn("用户的客观信息", note)
+        self.assertIn("以本轮为准", note)
+
+    def test_长段里的碎片单命中不算(self) -> None:
+        """「群里」是「别在群里发广告」的碎片，群聊里天天出现，不能触发。"""
+        self.assertEqual(conflict_signal(self.BLOCKS, "群里有人刷屏了"), "")
+
+    def test_谈两件事时点名两个词条(self) -> None:
+        note = conflict_signal(self.BLOCKS, "阿明不吃香菜")
+        self.assertIn("怎么称呼用户", note)
+        self.assertIn("偏好与忌讳", note)
+
+    def test_英文实体不分大小写(self) -> None:
+        """词条里写 `Arch`、用户打 `arch`，指的是一件事。"""
+        blocks = {ResidentBlock.PREFERENCE: "不用 Arch Linux"}
+        self.assertIn("arch", conflict_signal(blocks, "我改用 ARCH 了").lower())
+        self.assertIn("linux", conflict_signal(blocks, "我改用 Linux 了").lower())
+
+    def test_无关发言不触发(self) -> None:
+        for q in ("帮我看下这段代码", "今天天气不错", "我想学点东西"):
+            self.assertEqual(conflict_signal(self.BLOCKS, q), "", q)
+
+    def test_空词条不参与匹配(self) -> None:
+        self.assertEqual(conflict_signal({}, "我在杭州上班"), "")
+
+    def test_近况词给了弱提示但不点名(self) -> None:
+        note = drift_note(self.BLOCKS, "我现在在深圳上班")
+        self.assertIn("近况", note)
+        self.assertIn("矛盾的", note)
+        self.assertNotIn("用户的客观信息", note, "说不清是哪条，就不该瞎点名")
+
+    def test_没有画像时不做近况提示(self) -> None:
+        """词条全空时该做的是新建，不是「核对」。"""
+        self.assertEqual(drift_note({}, "我现在在深圳上班"), "")
+
+    def test_明确变化不依赖画像(self) -> None:
+        """「以后叫我小明」即使词条全空也要提示——那正是要新建的时候。"""
+        self.assertIn("情况变了", drift_note({}, "以后叫我小明"))
+
+    def test_近况词要有人称(self) -> None:
+        """「现在这段代码报错」说的是代码，不是这个人。"""
+        self.assertEqual(drift_note(self.BLOCKS, "现在这段代码报错"), "")
+        self.assertEqual(drift_note(self.BLOCKS, "这段代码已经跑通了"), "")
+
+    def test_一次注入只有一行核对提示(self) -> None:
+        """两行 80 字的叮嘱挤在一起，模型会两条都跳过。"""
+        text = render_inject(self.BLOCKS, is_group=False, query="我在杭州上班")
+        self.assertEqual(text.count("[本轮] "), 1)
+        self.assertNotIn("情况变了", text)
+
+    def test_精确优先于泛化(self) -> None:
+        """「我在杭州已经入职了」两级都能触发，只留精确那条。"""
+        text = render_inject(self.BLOCKS, is_group=False, query="我在杭州已经入职了")
+        self.assertIn("[本轮] 提到「杭州」", text)
+        self.assertNotIn("近况", text)
 
 
 class RenderTest(unittest.TestCase):

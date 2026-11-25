@@ -78,12 +78,20 @@ MAX_INJECT_CHARS = 4_000
 
 # 这两段每次注入都在，但很短。它们的作用是「告诉模型该动哪个工具」，
 # 不复述工具用法——schema 每轮都在上下文里，复述只是白烧 token。
+#
+# 第二条的措辞比 hermes_core 更硬，因为 core 那版只在「用户要求记住/修改/
+# 忘掉」时触发，而真实漏更新几乎都不是这种句式：用户只是随口说「我现在在
+# 深圳」，词条里还写着杭州，模型回一句「好的」就过去了。所以这里给出两条
+# 可执行的判据（②、③）和一句反问式的判断标准，而不是列举听上去像命令的话。
 MAINT_NOTES: tuple[str, ...] = (
     "[记忆使用约定] 需要回忆过去的具体细节时，先调用 search_memory 检索，"
     "不要凭印象编造；检索不到就如实说没有记录，不要说「我的记忆被清空了」。",
-    "[常驻维护] 常驻词条只由你维护：用户要求记住、修改或忘掉稳定信息，"
-    "或本轮对话表明某词条已过时，本轮就调用 update_resident 处理，"
-    "用法见工具描述；后台任务不会代劳。",
+    "[常驻维护] 常驻只由你维护，后台不代劳。出现任一种情况，本轮就用 "
+    "update_resident：① 用户要求记住、修改或忘掉某条稳定信息；② 他说到的现状"
+    "与某条词条不一致（词条写杭州、他说在深圳；词条写在读、他说已工作）"
+    "——以本轮为准改写那一条；③ 同一件事说得更具体。判据不是「他有没有说"
+    "记住」，而是「哪句话更新」：闲聊里给的新信息也要落进词条，陈旧的画像"
+    "比没有画像更糟。",
 )
 
 # 词条别名。模型偶尔会把标签当参数传（「称呼」而不是 `address`），
@@ -223,6 +231,172 @@ def state_change_signal(query: str) -> str:
     return ""
 
 
+# ---- 冲突线索：用户这句话和某个词条在谈同一件事吗 -------------------------
+#
+# STATE_CHANGE_WORDS 是「变化动词」视角（毕业、搬家、以后叫我），漏的正是
+# 最常见的一类：**没有变化动词，只是陈述了新现状**。「我现在在深圳」不含
+# 任何变化词，词条里写着杭州，模型就顺着回「深圳天气怎么样」——这句寒暄
+# 之后，画像永久停在杭州。
+#
+# 所以补一个「实体」视角：常驻词条里的具体词（城市、职业、称呼、禁忌）
+# 一旦在本轮发言里被提到，就说明用户在谈同一件事，此时把词条调出来核对
+# 几乎总是对的。这与「变化词」互补——「我结婚了」跟词条里的「单身」没有
+# 字面重叠，靠变化词抓；「我在深圳」跟「杭州」没有重叠，靠「深圳」和
+# 「在深圳」这种同段实体抓不到，但「我现在在深圳」里的「现在」是线索。
+
+# 只在与实体同时出现时才算数的现状线索。单看这些词太常见
+# （「现在这段代码报错」），所以它们不单独触发。
+_CHANGE_HINTS: tuple[str, ...] = (
+    "现在", "目前", "最近", "如今", "已经", "不再", "不搞", "不做",
+    "换了", "换成", "改回", "改成", "搬到", "调到", "转到", "考到", "考上",
+    "开始", "以后", "其实", "新公司", "新工作", "新项目", "刚",
+)
+
+# 线索词必须和第一人称同句才算数。「现在这段代码报错」「已经跑通了」
+# 里的「现在」「已经」是在说代码，不是在说这个人。
+_SELF_WORDS: tuple[str, ...] = ("我", "俺", "咱")
+
+# 纯虚词单字：两个都是虚词的 2-gram 不当实体（「我的」「可以」「一个」）。
+_VIRTUAL = set(
+    "我的了是在有和与就也都很会要不没这那个些么什怎为以但而或及等上下里中外后"
+    "前时候一二三四五六七八九十几多少太更最多好可你他她它们啊吧呢吗呀哦嗯把被"
+    "对给让从到于之其说做能想去来还再又等"
+)
+
+# 实体抽取：按标点/空白切段，中文段保留整段与 2-gram，英文段只收 3 个字符
+# 以上（"ai"、"ok" 这类短词在对话里到处都是，命中也没有信息量）。
+_ANCHOR_SPLIT = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9]+")
+
+
+def _split_anchors(text: str) -> tuple[set[str], set[str]]:
+    """把一段词条文本拆成（独立实体, 碎片）。
+
+    这个区分是降噪的关键。`28 岁，杭州，做客服` 里「杭州」是被标点切开的
+    整段，提到它基本就是在说这个人的所在地；而 `别在群里发广告` 里的
+    「群里」只是长段中的一个 2-gram，群聊里天天出现，命中它什么也不说明。
+    所以：独立实体命中一个就够，碎片要命中两个或命中一个较长的。
+    """
+    solid: set[str] = set()
+    frag: set[str] = set()
+    for seg in _ANCHOR_SPLIT.split(str(text or "")):
+        if not seg:
+            continue
+        if seg.isascii():
+            if len(seg) >= 3:  # "ai"/"ok" 这类短词到处都是，没有信息量
+                solid.add(seg.lower())
+            continue
+        if len(seg) < 2:
+            continue
+        if len(seg) <= 6:
+            solid.add(seg)
+        for i in range(len(seg) - 1):
+            gram = seg[i:i + 2]
+            if not (gram[0] in _VIRTUAL and gram[1] in _VIRTUAL):
+                frag.add(gram)
+    return solid, frag - solid
+
+
+def _strip_covered(found: set[str]) -> list[str]:
+    """去掉被更长锚点覆盖的碎片：「杭州」命中时不必再列「杭」。"""
+    kept = [a for a in found if not any(a != b and a in b for b in found)]
+    return sorted(kept, key=len, reverse=True)
+
+
+def conflict_signal(blocks: dict[ResidentBlock, str], query: str,
+                    *, max_labels: int = 2) -> str:
+    """本轮发言是否在谈某几个词条里的具体信息，返回一句提醒（空串 = 无关）。
+
+    只做**字面相关性**判断，不判断是否真的冲突——那要语义理解，这里做不到
+    也不该做。命中时说的话是「如果说法不一致，以本轮为准」，判断留给模型，
+    因为只有它看过完整对话。
+
+    为什么不无脑每轮提示：每轮多 50 字听着不多，但几百个账号、每轮都带，
+    模型很快会学会无视这一行。只在「用户真在聊这件事」时出现，它才有效。
+    """
+    q = str(query or "")
+    if not q:
+        return ""
+    q_low = q.lower()
+
+    hits: list[tuple[ResidentBlock, list[str]]] = []
+    for block in ResidentBlock.ordered():
+        text = str(blocks.get(block) or "")
+        if not text.strip():
+            continue
+        solid, frag = _split_anchors(text)
+        found = {a for a in solid if a in q_low}
+        found |= {a for a in frag if a in q_low}
+        if not found:
+            continue
+        # 触发门槛：命中一个独立实体（杭州、做客服、阿明），
+        # 或命中两个以上碎片（说明整句都在谈这件事），
+        # 或本次说法带现状线索（现在、已经、刚）。
+        long_frag = any(len(a) >= 3 for a in found)
+        hinted = any(h in q for h in _CHANGE_HINTS)
+        if not (found & solid or len(found) >= 2 or long_frag or hinted):
+            continue
+        hits.append((block, _strip_covered(found)))
+    if not hits:
+        return ""
+
+    labels = "、".join(
+        f"「{INJECT_LABELS.get(b, b.value)}」" for b, _ in hits[:max_labels]
+    )
+    words = "、".join(
+        a for _, found in hits[:max_labels] for a in found[:2]
+    )
+    label = f"[本轮] 提到「{words}」，与{labels}相关："
+    return (
+        label + "如果和词条里的说法不一致，以本轮为准改写那一条，不要新旧并存。"
+    )
+
+
+# 「有画像才核对」：词条全空时让人去「核对」是荒谬的，那是新建不是核对。
+_PROFILE_BLOCKS = (
+    ResidentBlock.ADDRESS,
+    ResidentBlock.USER,
+    ResidentBlock.PREFERENCE,
+)
+
+
+def drift_note(blocks: dict[ResidentBlock, str], query: str) -> str:
+    """通用的「本轮在说自己的状况」提醒，不指向具体词条。
+
+    两档措辞，因为它们的信息量不同：
+
+    - `STATE_CHANGE_WORDS` 命中（毕业、搬家、以后叫我）——明确的身份/状态
+      变更，措辞可以说死：「被取代的现在就改写」。
+    - `_CHANGE_HINTS` 命中（现在、已经、刚）——只是句子里带了个近况词，
+      说不清哪里变了，只能说「矛盾才改，一致别动」。且这一档还要求
+      **已有画像**：词条全空时该做的是新建，而 `update_resident` 的工具
+      描述已经讲了怎么新建，这里再叮嘱一遍只是噪声。
+
+    比 `conflict_signal` 弱：它说不清是哪一条有问题，只能要求逐条核对。
+    所以只在没有更精确的线索时才出现，一次注入里不出现两行「记得核对」。
+    """
+    q = str(query or "")
+    if not q:
+        return ""
+    sig = state_change_signal(q)
+    if sig:
+        return (
+            f"[本轮] 用户在说自己的情况变了（{sig}）："
+            "逐条核对上面的词条，被取代的现在就改写，别新旧并存。"
+            "用户没提的词条不要动。"
+        )
+    if not any(str(blocks.get(b) or "").strip() for b in _PROFILE_BLOCKS):
+        return ""
+    if not any(w in q for w in _SELF_WORDS):
+        return ""
+    hint = next((h for h in _CHANGE_HINTS if h in q), "")
+    if not hint:
+        return ""
+    return (
+        f"[本轮] 用户在说自己的近况（{hint}）："
+        "和上面某条词条矛盾的就以本轮为准改写那一条；一致的别动。"
+    )
+
+
 # 写入方向检查用的两组信号。
 #
 # 这是**软提示**，不阻断写入：用户原话「我叫小明，叫我小明」本身就把
@@ -290,19 +464,18 @@ def render_inject(blocks: dict[ResidentBlock, str], *, is_group: bool,
         head.append(GROUP_NOTE)
 
     maint = list(MAINT_NOTES)
-    sig = state_change_signal(query)
-    if sig:
-        # 只在用户明确陈述自身变化时追加，平时不占 token
-        maint.append(
-            f"[常驻维护] 用户在说自己的情况变了（{sig}）："
-            "逐条核对上面的词条，被取代的现在就改写，别新旧并存。"
-        )
+    filled_blocks = {
+        b: str(blocks.get(b) or "").strip() for b in ResidentBlock.ordered()
+    }
+    # 三级：精确（点名词条）> 泛化（在说自己的状况）> 不说。
+    # 只加一行。两句 80 字的叮嘱挤在一起，模型反而两条都跳过——
+    # 而且它们要说的是同一件事：核对词条，别新旧并存。
+    note = conflict_signal(filled_blocks, query) or drift_note(filled_blocks, query)
+    if note:
+        maint.append(note)
     tail = maint + [INJECT_CLOSE]
 
-    filled = [
-        (b, str(blocks.get(b) or "").strip()) for b in ResidentBlock.ordered()
-    ]
-    filled = [(b, t) for b, t in filled if t]
+    filled = [(b, t) for b, t in filled_blocks.items() if t]
 
     body: list[str] = []
     if filled:
@@ -361,7 +534,9 @@ __all__ = [
     "STATE_CHANGE_WORDS",
     "append_system_prompt",
     "clean_text",
+    "conflict_signal",
     "direction_advice",
+    "drift_note",
     "is_injection",
     "render_inject",
     "resolve_block",

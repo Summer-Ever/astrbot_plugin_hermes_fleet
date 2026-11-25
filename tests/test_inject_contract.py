@@ -18,6 +18,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
+RESIDENT = (ROOT / "packages" / "fleet" / "src" / "hermes_fleet" / "resident.py"
+            ).read_text(encoding="utf-8")
+
+
+class TestMaintenancePrompt(unittest.TestCase):
+    """维护提示词本身就是提示工程产物，措辞丢了行为就回退。
+
+    这几条断言守的是「哪句话更新」这个判据还在——没有它，模型会退回到
+    「等用户说『记住』才写」，而这正是用户报告的漏更新。
+    """
+
+    def test_常驻约定写明矛盾优先(self) -> None:
+        self.assertIn("以本轮为准", RESIDENT)
+        self.assertIn("哪句话更新", RESIDENT)
+
+    def test_工具描述写明冲突也要改(self) -> None:
+        self.assertIn("哪句话更新", MAIN)
+        self.assertIn("不要让新旧两种说法并存", MAIN)
+
+    def test_注入块里有本轮提示的落点(self) -> None:
+        """动态提示必须有标签，模型才能把它和常驻约定区分开。"""
+        self.assertIn('"[本轮] ', RESIDENT)
 
 
 class TestInjectionPlacement(unittest.TestCase):
