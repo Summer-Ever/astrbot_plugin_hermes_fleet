@@ -21,6 +21,8 @@ MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 SCHEMA = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 SETTINGS = (ROOT / "packages" / "fleet" / "src" / "hermes_fleet" / "settings.py"
             ).read_text(encoding="utf-8")
+EXPORT_SRC = (ROOT / "packages" / "fleet" / "src" / "hermes_fleet" / "export.py"
+              ).read_text(encoding="utf-8")
 
 
 class TestExportContract(unittest.TestCase):
@@ -40,22 +42,18 @@ class TestExportContract(unittest.TestCase):
 
     def test_取数走已过滤的服务方法(self) -> None:
         self.assertIn("self.svc.export_owner(", MAIN)
-        self.assertIn("render_document(", MAIN)
+        self.assertIn("render_chat(", MAIN)
+        self.assertIn("render_memory_config(", MAIN)
         # main.py 里一旦出现 SQL，就会绕过 pair_replies 直接写原文
         self.assertNotRegex(MAIN, re.compile(r"\bselect\b.*\bmessages\b", re.I))
 
     def test_渲染参数不能与数据字典重名(self) -> None:
-        """这是实际踩过的 bug：data 里已有 bot_id/owner_id，
-        调用处再显式传一遍会在运行时 TypeError，而本机没有 astrbot，
-        命令路径跑不起来，只能靠源码契约挡。"""
-        call = re.search(
-            r"doc = render_document\((.*?)\n\s*\)", MAIN, re.S
-        )
-        self.assertIsNotNone(call)
-        args = call.group(1)
-        self.assertIn("**data", args)
-        self.assertNotIn("bot_id=", args)
-        self.assertNotIn("owner_id=", args)
+        """实际踩过的 bug：data 里已有 bot_id/owner_id，显式再传会 TypeError。
+        现在通过字典推导只挑需要的键，不能出现裸的 **data。"""
+        self.assertNotIn("**data)", MAIN)
+        # 两份文档各自只挑自己需要的字段
+        self.assertIn('"message_total")', MAIN)
+        self.assertIn('"memory_total")', MAIN)
 
     def test_文件组件带url与名字(self) -> None:
         self.assertIn("from astrbot.api.message_components import File", MAIN)
@@ -85,9 +83,44 @@ class TestConfig(unittest.TestCase):
 
     def test_默认值能直接用(self) -> None:
         self.assertIs(SCHEMA["export_enabled"]["default"], True)
-        self.assertGreaterEqual(SCHEMA["export_max_messages"]["default"], 100)
+        # 0 = 全量导出；用户明确要求不再按条数截断。
+        self.assertEqual(SCHEMA["export_max_messages"]["default"], 0)
         self.assertGreaterEqual(SCHEMA["export_keep_days"]["default"], 0.5)
+
+    def test_两份文件分别发送且都查大小(self) -> None:
+        self.assertIn("render_chat(", MAIN)
+        self.assertIn("render_memory_config(", MAIN)
+        self.assertIn("check_export_size(", MAIN)
+        self.assertIn('_save("chat", chat_doc)', MAIN)
+        self.assertIn('_save("memory", cfg_doc)', MAIN)
+        # 超限必须一个文件都不发，避免只发出一半
+        self.assertLess(MAIN.index("check_export_size("), MAIN.index("_save("))
+
+    def test_import块与解析函数在导出模块里(self) -> None:
+        self.assertIn("IMPORT_OPEN", EXPORT_SRC)
+        self.assertIn("def parse_memory_config", EXPORT_SRC)
+        self.assertIn("MAX_EXPORT_BYTES", EXPORT_SRC)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestImportContract(unittest.TestCase):
+    def test_两个导入入口共用流程(self) -> None:
+        self.assertIn('@filter.command("导入记忆")', MAIN)
+        self.assertIn('@fleet.command("导入记忆")', MAIN)
+        self.assertIn("async def _import_flow", MAIN)
+
+    def test_从消息找附件并异步读取(self) -> None:
+        self.assertIn("get_messages()", MAIN)
+        self.assertIn(".get_file()", MAIN)
+        # 先解析后写入，不能跳过 parse 直接塞原文
+        self.assertLess(MAIN.index("parse_memory_config("), MAIN.index("import_owner("))
+
+    def test_导入前检查文件大小(self) -> None:
+        self.assertIn("MAX_EXPORT_BYTES", MAIN)
+        self.assertIn("getsize(path)", MAIN)
+
+    def test_导入走service层(self) -> None:
+        self.assertIn("self.svc.import_owner(", MAIN)

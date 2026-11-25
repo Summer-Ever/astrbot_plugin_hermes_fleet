@@ -319,18 +319,23 @@ class SqliteMessageStore:
         N 条，导出永远是几个月前的开头，最新的对话反而看不到。
 
         `limit` 是**原始行数**，不是最终导出行数——会话里还有别人的发言
-        要参与配对，所以调用方要放大这个窗口。
+        要参与配对，所以调用方要放大这个窗口。传 0 或负数表示**全量**（不
+        加 SQL limit）：用户要求原文有几千万字也照发，只由文件大小兜底。
         """
         owner = str(owner_id or "")
         if not owner:
             return []
+        cap = int(limit)
+        sql = (
+            "select id, session_id, owner_id, group_id, role, content, ts, summarized "
+            + self._session_sql() + " order by id desc"
+        )
+        args: tuple = (str(bot_id), str(bot_id), owner)
+        if cap > 0:
+            sql += " limit ?"
+            args += (cap,)
         with self._lock:
-            rows = self._conn.execute(
-                "select id, session_id, owner_id, group_id, role, content, ts, summarized "
-                + self._session_sql()
-                + " order by id desc limit ?",
-                (str(bot_id), str(bot_id), owner, max(1, int(limit))),
-            ).fetchall()
+            rows = self._conn.execute(sql, args).fetchall()
         rows.reverse()
         return [
             Message(

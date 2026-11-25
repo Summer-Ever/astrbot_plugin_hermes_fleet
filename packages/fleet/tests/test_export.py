@@ -1,4 +1,4 @@
-"""记忆导出：文档内容 + 隐私边界。
+"""记忆导出：两份文档内容 + 隐私边界 + 导入往返。
 
 导出是这套系统里唯一一处把**原始对话**写进文件并发到聊天里的路径，
 所以这里的断言比其他模块更硬：宁可少导一条，也不能把群友的话发给
@@ -24,7 +24,9 @@ from hermes_contracts import (  # noqa: E402
 )
 from hermes_fleet import BotRegistry, MemoryService  # noqa: E402
 from hermes_fleet.export import (  # noqa: E402
-    export_filename, pair_replies, render_document, stale_exports,
+    IMPORT_OPEN, MAX_EXPORT_BYTES, check_export_size, export_filename,
+    pair_replies, parse_memory_config, render_chat, render_memory_config,
+    stale_exports,
 )
 
 
@@ -54,62 +56,136 @@ def _resident(block: ResidentBlock, text: str, *, group: str = "") -> ResidentEn
     )
 
 
-class TestRender(unittest.TestCase):
-    def test_三段齐全且带主语标签(self) -> None:
-        doc = render_document(
+class TestRenderChat(unittest.TestCase):
+    def test_原文带年月日且一条一行(self) -> None:
+        doc = render_chat(
+            bot_id="qq-01", owner_id="alice", note="客服号",
+            messages=[
+                _msg("你好", ts=1764000000),
+                _msg("好的", role="assistant", mid=2, ts=1764000000),
+            ],
+            now=1764000000, version="0.9.0",
+        )
+        self.assertIn("# 对话原文 · 客服号（qq-01）", doc)
+        self.assertIn("[2025-11-25 ", doc)  # 年月日必须出现，不能只有时分
+        self.assertIn("你：你好", doc)
+        self.assertIn("机器人：好的", doc)
+        self.assertIn("## 私聊", doc)
+
+    def test_原文全量不截断(self) -> None:
+        body = "一字" * 1000  # 2000 字，远超旧的 800 字截断
+        doc = render_chat(bot_id="qq-01", owner_id="alice",
+                          messages=[_msg(body)])
+        self.assertIn(body, doc)
+        self.assertNotIn("文档内截断", doc)
+
+    def test_空原文给出说明(self) -> None:
+        doc = render_chat(bot_id="qq-01", owner_id="alice")
+        self.assertIn("（没有聊天原文。）", doc)
+
+    def test_群按群号分段(self) -> None:
+        doc = render_chat(bot_id="qq-01", owner_id="alice",
+                          messages=[_msg("大家好", group="g-1", session="g")])
+        self.assertIn("## 群 g-1", doc)
+
+
+class TestRenderConfig(unittest.TestCase):
+    def test_常驻归档齐全并带导入块(self) -> None:
+        doc = render_memory_config(
             bot_id="qq-01", owner_id="alice", note="客服号",
             resident=[_resident(ResidentBlock.ADDRESS, "阿明")],
             memories=[_mem("在做客服")],
-            messages=[_msg("你好")],
-            now=1764000000,
+            now=1764000000, version="0.9.0",
         )
-        self.assertIn("# 记忆导出 · 客服号（qq-01）", doc)
+        self.assertIn("# 记忆配置 · 客服号（qq-01）", doc)
+        self.assertIn(IMPORT_OPEN, doc)
         self.assertIn("## 一、常驻记忆", doc)
         self.assertIn("## 二、归档记忆", doc)
-        self.assertIn("## 三、聊天原文", doc)
         self.assertIn("怎么称呼用户", doc)
-        self.assertNotIn("| 称呼 |", doc)  # 短标签有两读歧义
+        self.assertNotIn("| 称呼 |", doc)
         self.assertIn("`#7`", doc)
-        self.assertIn("**08:01 你**：你好", doc)
+        self.assertNotIn("## 三、聊天原文", doc)  # 原文已经不在这份里
 
     def test_空数据不出现空白章节(self) -> None:
-        doc = render_document(bot_id="qq-01", owner_id="alice")
+        doc = render_memory_config(bot_id="qq-01", owner_id="alice")
         self.assertIn("（没有设置常驻词条。）", doc)
         self.assertIn("（没有归档记忆。）", doc)
-        self.assertIn("（没有聊天原文。）", doc)
 
     def test_长文本压成一行且转义竖线(self) -> None:
-        doc = render_document(
+        doc = render_memory_config(
             bot_id="qq-01", owner_id="alice",
             resident=[_resident(ResidentBlock.RULES, "a|b\nc")],
         )
         self.assertIn("a\\|b c", doc)
-        self.assertNotIn("\n", "a\\|b c")
 
-    def test_超长原文注明截断(self) -> None:
-        doc = render_document(
+    def test_导入块里中文不转义(self) -> None:
+        doc = render_memory_config(
             bot_id="qq-01", owner_id="alice",
-            messages=[_msg("字" * 100)], max_chat_chars=20,
+            resident=[_resident(ResidentBlock.ADDRESS, "阿明")],
         )
-        self.assertIn("原文 100 字，文档内截断", doc)
+        self.assertIn('"text":"阿明"', doc)
+        self.assertNotIn("\\u963f", doc)
 
-    def test_群常驻按群分组(self) -> None:
-        doc = render_document(
-            bot_id="qq-01", owner_id="alice",
-            resident=[_resident(ResidentBlock.RULES, "不发广告", group="g-1")],
-            messages=[_msg("大家好", group="g-1")],
-        )
-        self.assertIn("### 群 g-1", doc)
-        self.assertIn("规则与避雷", doc)
 
-    def test_概览写明截断数量(self) -> None:
-        doc = render_document(
-            bot_id="qq-01", owner_id="alice",
-            memories=[_mem("最近一条")], memory_total=99,
-            messages=[_msg("最近一句")], message_total=1234,
+class TestParseImport(unittest.TestCase):
+    def test_往返一致(self) -> None:
+        resident = [
+            _resident(ResidentBlock.ADDRESS, "阿明"),
+            _resident(ResidentBlock.RULES, "不发广告", group="g-1"),
+        ]
+        memories = [_mem("在做客服"), _mem("群记忆", mid=8, group="g-1")]
+        doc = render_memory_config(
+            bot_id="qq-01", owner_id="alice", note="客服号",
+            resident=resident, memories=memories, now=1764000000,
         )
-        self.assertIn("归档记忆 | 99 条（本次写入 1 条）", doc)
-        self.assertIn("聊天原文 | 1234 条（本次导出 1 条）", doc)
+        got = parse_memory_config(doc)
+        self.assertEqual(got["bot_id"], "qq-01")
+        self.assertEqual(got["owner_id"], "alice")
+        self.assertEqual(got["note"], "客服号")
+        self.assertEqual(
+            [(r["scope"], r["block"], r["text"]) for r in got["resident"]],
+            [("private", "address", "阿明"), ("group:g-1", "rules", "不发广告")],
+        )
+        self.assertEqual([m["content"] for m in got["memories"]],
+                         ["在做客服", "群记忆"])
+        self.assertEqual(got["memories"][1]["group_id"], "g-1")
+
+    def test_人的排版改动不影响解析(self) -> None:
+        doc = render_memory_config(bot_id="qq-01", owner_id="alice",
+                                   resident=[_resident(ResidentBlock.USER, "28 岁")])
+        doc = doc.replace("# 记忆配置", "# 我改过的标题").replace("## 概览", "随便写")
+        self.assertEqual(parse_memory_config(doc)["resident"][0]["text"], "28 岁")
+
+    def test_没有导入块直接报错(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_memory_config("# 随便一个文件")
+
+    def test_坏JSON报错(self) -> None:
+        bad = f"{IMPORT_OPEN}\n{{not json}}\n-->"
+        with self.assertRaises(ValueError):
+            parse_memory_config(bad)
+
+    def test_未知词条报错(self) -> None:
+        doc = render_memory_config(
+            bot_id="qq-01", owner_id="alice",
+            resident=[_resident(ResidentBlock.ADDRESS, "阿明")],
+        ).replace('"block":"address"', '"block":"unknown"')
+        with self.assertRaises(ValueError):
+            parse_memory_config(doc)
+
+    def test_空群号报错(self) -> None:
+        doc = render_memory_config(
+            bot_id="qq-01", owner_id="alice",
+            resident=[_resident(ResidentBlock.RULES, "x", group="g-1")],
+        ).replace('"scope":"group:g-1"', '"scope":"group:"')
+        with self.assertRaises(ValueError):
+            parse_memory_config(doc)
+
+    def test_超长归档记忆报错(self) -> None:
+        doc = render_memory_config(bot_id="qq-01", owner_id="alice",
+                                   memories=[_mem("字" * 501)])
+        with self.assertRaises(ValueError):
+            parse_memory_config(doc)
 
 
 class TestPairReplies(unittest.TestCase):
@@ -124,7 +200,7 @@ class TestPairReplies(unittest.TestCase):
         ]
         kept = pair_replies(rows, "alice")
         self.assertEqual([r.id for r in kept], [1, 2, 5, 6])
-        self.assertNotIn("bob 的秘密", render_document(
+        self.assertNotIn("bob 的秘密", render_chat(
             bot_id="qq-01", owner_id="alice", messages=kept,
         ))
 
@@ -148,6 +224,13 @@ class TestFilename(unittest.TestCase):
         self.assertNotIn("..", name)
         self.assertTrue(name.endswith(".md"))
 
+    def test_两份文件前缀不同(self) -> None:
+        chat = export_filename("qq-01", "alice", ts=0, kind="chat")
+        cfg = export_filename("qq-01", "alice", ts=0, kind="memory")
+        self.assertTrue(chat.startswith("hermes-chat-"))
+        self.assertTrue(cfg.startswith("hermes-memory-"))
+        self.assertNotEqual(chat, cfg)
+
     def test_中文账号名不会让附件名变问号(self) -> None:
         name = export_filename("客服号", "张三", ts=0)
         self.assertTrue(all(ord(c) < 128 for c in name), name)
@@ -159,10 +242,26 @@ class TestStaleExports(unittest.TestCase):
         stale = stale_exports(entries, now=1000.0, keep_days=1, max_files=2)
         self.assertEqual(stale, ["old.md"])
 
-    def test_刚生成的文件不会因系统时钟回拨被删(self) -> None:
-        entries = [("fresh.md", 2000.0), ("old.md", 100.0)]
-        stale = stale_exports(entries, now=1000.0, keep_days=1, max_files=60)
-        self.assertNotIn("fresh.md", stale)
+    def test_txt也参与清理(self) -> None:
+        entries = [("a.md", 1000.0), ("b.txt", 900.0), ("old.md", 10.0)]
+        stale = stale_exports(entries, now=1000.0, keep_days=1, max_files=2)
+        self.assertEqual(stale, ["old.md"])
+
+
+class TestSizeLimit(unittest.TestCase):
+    def test_上限是100MB(self) -> None:
+        self.assertEqual(MAX_EXPORT_BYTES, 100 * 1024 * 1024)
+
+    def test_按UTF8字节算而非字符数(self) -> None:
+        over, size = check_export_size("字" * 100)
+        self.assertFalse(over)
+        self.assertEqual(size, 300)  # 中文 3 字节
+
+    def test_超限时返回True(self) -> None:
+        big = "x" * (MAX_EXPORT_BYTES + 1)
+        over, size = check_export_size(big)
+        self.assertTrue(over)
+        self.assertGreater(size, MAX_EXPORT_BYTES)
 
 
 class ExportBase(unittest.IsolatedAsyncioTestCase):
@@ -194,20 +293,23 @@ class TestExportData(ExportBase):
         await self.svc.capture_turn(charlie, "group-session", "charlie 说的话", "回复 charlie")
 
         data = await self.svc.export_owner(platform_id="qq-01", owner_id="alice")
-        doc = render_document(
+        chat = render_chat(
             bot_id=data["bot_id"], owner_id=data["owner_id"],
-            resident=data["resident"], memories=data["memories"],
-            messages=data["messages"],
-            memory_total=data["memory_total"],
-            message_total=data["message_total"],
+            messages=data["messages"], message_total=data["message_total"],
             now=1764000000,
         )
-        self.assertIn("阿明", doc)
-        self.assertIn("alice 在杭州", doc)
-        self.assertIn("我的私聊", doc)
+        cfg = render_memory_config(
+            bot_id=data["bot_id"], owner_id=data["owner_id"],
+            resident=data["resident"], memories=data["memories"],
+            memory_total=data["memory_total"], now=1764000000,
+        )
+        self.assertIn("阿明", cfg)
+        self.assertIn("alice 在杭州", cfg)
+        self.assertIn("我的私聊", chat)
         for secret in ("鲍勃", "bob 的秘密", "bob 说的话", "charlie 说的话",
                        "回复 bob", "回复 charlie"):
-            self.assertNotIn(secret, doc)
+            self.assertNotIn(secret, chat)
+            self.assertNotIn(secret, cfg)
 
     async def test_群会话里本人的发言与机器人回复都在(self) -> None:
         alice = await self._scene("alice", "g-1")
@@ -220,8 +322,16 @@ class TestExportData(ExportBase):
         self.assertIn("回复 alice", texts)
         self.assertNotIn("bob 在群里", texts)
         self.assertNotIn("回复 bob", texts)
-        # 窗口没吃满时总数要精确：不能把回复群友的那条算进「我的原文」
         self.assertEqual(data["message_total"], 2)
+
+    async def test_全量导出不截断(self) -> None:
+        alice = await self._scene("alice")
+        # 造 100 轮对话，旧的 3000 条上限不至于触发，但验证导出走全量路径
+        for i in range(100):
+            await self.svc.capture_turn(alice, "s", f"第{i}句", f"回复{i}")
+        data = await self.svc.export_owner(platform_id="qq-01", owner_id="alice")
+        self.assertEqual(len(data["messages"]), 200)
+        self.assertIn("第99句", [m.content for m in data["messages"]])
 
     async def test_空owner与未知账号返回空包(self) -> None:
         for owner, pid in (("", "qq-01"), ("alice", "never-seen")):

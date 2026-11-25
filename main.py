@@ -136,7 +136,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.8.0"
+PLUGIN_VERSION = "0.9.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -790,39 +790,48 @@ class HermesFleet(Star):
             return
 
         pid = self._platform_id(event)
-        try:
-            max_messages = int(self._get_cfg("export_max_messages", 3000))
-        except (TypeError, ValueError):
-            max_messages = 3000
-        data = await self.svc.export_owner(
-            platform_id=pid, owner_id=target, max_messages=max_messages
-        )
+        # 原文全量导出，不再按条数截断；唯一上限是文件大小（下面按字节查）。
+        data = await self.svc.export_owner(platform_id=pid, owner_id=target)
         if not (data["resident"] or data["memories"] or data["messages"]):
             who = "你" if target == str(scene.owner_id) else target
             yield event.plain_result(f"这个机器人账号下还没有{who}的记忆数据。")
             return
 
         from hermes_fleet.export import (
-            export_filename, render_document, stale_exports,
+            MAX_EXPORT_BYTES, check_export_size, export_filename,
+            render_chat, render_memory_config, stale_exports,
         )
 
-        # bot_id / owner_id 由 data 提供，这里不能重复传——Python 会在
-        # 调用处直接 TypeError（源码契约测试钉住这一点）。
-        doc = render_document(
-            note=self.registry.note_of(pid),
-            version=PLUGIN_VERSION,
-            now=time.time(),
-            **data,
-        )
+        note = self.registry.note_of(pid)
+        now = time.time()
+        # bot_id / owner_id 由 data 提供，不能重复显式传（会 TypeError）。
+        chat_doc = render_chat(note=note, version=PLUGIN_VERSION, now=now, **{
+            k: v for k, v in data.items()
+            if k in ("bot_id", "owner_id", "messages", "message_total")
+        })
+        cfg_doc = render_memory_config(note=note, version=PLUGIN_VERSION, now=now, **{
+            k: v for k, v in data.items()
+            if k in ("bot_id", "owner_id", "resident", "memories", "memory_total")
+        })
+
+        over, size = check_export_size(chat_doc, cfg_doc)
+        if over:
+            yield event.plain_result(
+                f"导出失败：记忆数据约 {size / 1024 / 1024:.1f} MB，"
+                f"超过 {MAX_EXPORT_BYTES // 1024 // 1024} MB 上限。"
+                "请联系管理员调整导出策略。"
+            )
+            return
+
         out_dir = self._export_dir()
         try:
             entries = [
                 (n, os.path.getmtime(os.path.join(out_dir, n)))
-                for n in os.listdir(out_dir) if n.lower().endswith(".md")
+                for n in os.listdir(out_dir)
+                if n.lower().endswith((".md", ".txt"))
             ]
             keep_days = float(self._get_cfg("export_keep_days", 7) or 7)
-            for stale in stale_exports(entries, now=time.time(),
-                                       keep_days=keep_days):
+            for stale in stale_exports(entries, now=now, keep_days=keep_days):
                 try:
                     os.remove(os.path.join(out_dir, stale))
                 except OSError:
@@ -830,35 +839,46 @@ class HermesFleet(Star):
         except Exception:
             logger.warning(f"[hermes_fleet] 清理旧导出失败:\n{traceback.format_exc(limit=3)}")
 
-        name = export_filename(pid, target)
-        path = os.path.join(out_dir, name)
-        seq = 1
-        while os.path.exists(path):  # 同一秒内连发两次
-            stem, ext = os.path.splitext(name)
-            path = os.path.join(out_dir, f"{stem}-{seq}{ext}")
-            seq += 1
-        # 显式 UTF-8：Windows 默认 cp936，含 emoji 的记忆写下去会在别的
-        # 机器上直接乱码，而导出文件是要发到聊天里给人看的。
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(doc)
+        def _save(kind: str, doc: str) -> str:
+            name = export_filename(pid, target, now, kind=kind)
+            path = os.path.join(out_dir, name)
+            seq = 1
+            while os.path.exists(path):  # 同一秒内连发两次
+                stem, ext = os.path.splitext(name)
+                path = os.path.join(out_dir, f"{stem}-{seq}{ext}")
+                seq += 1
+            # 显式 UTF-8：Windows 默认 cp936，含 emoji 的记忆写下去会乱码。
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(doc)
+            return path
+
+        cfg_path = _save("memory", cfg_doc)
+        chat_path = _save("chat", chat_doc)
 
         yield event.plain_result(
             f"已整理：常驻 {len(data['resident'])} 条，"
             f"归档 {data['memory_total']} 条，"
-            f"聊天原文 {len(data['messages'])}/{data['message_total']} 条。"
-            "文档随后发送。"
+            f"聊天原文 {len(data['messages'])} 条（全量）。两份文件随后发送。"
         )
-        component = self._file_component(path)
+        # 先发记忆配置（小、可导入），再发原文（大）。分开发避免单条消息
+        # 太大被平台拒收；任一平台不支持组件时给出本地路径兜底。
+        component = self._file_component(cfg_path)
         if component is None:
             yield event.plain_result(
-                "当前环境不支持发送文件组件，文档已保存在：\n" + path
+                "当前环境不支持发送文件组件，记忆配置已保存在：\n" + cfg_path
             )
-            return
-        yield event.chain_result([component])
+        else:
+            yield event.chain_result([component])
+
+        component = self._file_component(chat_path)
+        if component is None:
+            yield event.plain_result("聊天原文已保存在：\n" + chat_path)
+        else:
+            yield event.chain_result([component])
 
     @filter.command("提取记忆")
     async def export_memory(self, event: AstrMessageEvent):
-        """把「你 + 本机器人」的常驻记忆、归档记忆和聊天原文打包发给你。"""
+        """把「你 + 本机器人」的常驻、归档和聊天原文分两份文件发给你。"""
         async for result in self._export_flow(event):
             yield result
 
@@ -867,6 +887,89 @@ class HermesFleet(Star):
         """同 /提取记忆；可带用户标识导出他人（仅管理员）。"""
         async for result in self._export_flow(event):
             yield result
+
+    @filter.command("导入记忆")
+    async def import_memory(self, event: AstrMessageEvent):
+        """附上「记忆配置」文件，把里面的常驻与归档记忆导入到本账号下。
+
+        常驻按词条覆盖，归档追加。导入前请确认文档来源可信。
+        """
+        async for result in self._import_flow(event):
+            yield result
+
+    @fleet.command("导入记忆")
+    async def fleet_import_memory(self, event: AstrMessageEvent):
+        """同 /导入记忆（命令组入口）。"""
+        async for result in self._import_flow(event):
+            yield result
+
+    async def _import_flow(self, event: AstrMessageEvent):
+        """导入记忆配置的完整流程。两个命令入口共用。"""
+        if not as_flag(self._get_cfg("export_enabled", True), True):
+            yield event.plain_result("记忆导入已在插件设置里关闭。")
+            return
+
+        from hermes_fleet.export import MAX_EXPORT_BYTES, parse_memory_config
+
+        # 从消息里找 File 组件。命令词本身可能和文件同一条消息发出，
+        # get_messages() 只包含组件，不含命令文本，逐个找即可。
+        file_comp = None
+        try:
+            for comp in event.get_messages():
+                if getattr(comp, "type", None) and str(getattr(comp.type, "value", "")).lower() == "file":
+                    file_comp = comp
+                    break
+                if comp.__class__.__name__.lower() == "file":
+                    file_comp = comp
+                    break
+        except Exception:
+            file_comp = None
+        if file_comp is None:
+            yield event.plain_result(
+                "请把「记忆配置」文件作为附件和命令一起发来"
+                "（文件名以 hermes-memory- 开头）。"
+            )
+            return
+
+        try:
+            path = await file_comp.get_file()
+        except Exception:
+            path = ""
+        if not path or not os.path.exists(path):
+            yield event.plain_result("无法读取附件文件，请重试或换一个平台发送。")
+            return
+
+        try:
+            if os.path.getsize(path) > MAX_EXPORT_BYTES:
+                yield event.plain_result("附件超过 100MB，拒绝导入。")
+                return
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            payload = parse_memory_config(text)
+        except ValueError as exc:
+            yield event.plain_result(f"导入失败：{exc}")
+            return
+        except OSError:
+            yield event.plain_result("附件读取失败，请重试。")
+            return
+
+        scene = await self.svc.scene(**self._scene_args(event))
+        pid = self._platform_id(event)
+        try:
+            result = await self.svc.import_owner(
+                platform_id=pid, owner_id=str(scene.owner_id), payload=payload,
+            )
+        except ValueError as exc:
+            yield event.plain_result(f"导入失败：{exc}")
+            return
+
+        yield event.plain_result(
+            "导入完成：常驻 "
+            f"{result['resident_imported']} 条（按词条覆盖），"
+            f"归档记忆 {result['memories_imported']} 条（追加）。"
+            + (f"来源文档记录的是 {payload['bot_id']} / {payload['owner_id']}，"
+               "已导入到当前账号。" if payload.get("bot_id") else "")
+        )
 
     @fleet.command("总结")
     async def fleet_summarize(self, event: AstrMessageEvent):

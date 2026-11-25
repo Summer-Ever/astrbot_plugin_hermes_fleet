@@ -361,12 +361,17 @@ class SqliteMemoryStore:
         owner = str(owner_id or "")
         if not owner:
             return []
+        cap = int(limit)
+        sql = (
+            f"select {_COLS} from memories where bot_id=? and owner_id=?"
+            " and merged_into=0 order by ts asc, id asc"
+        )
+        args: tuple = (str(bot_id), owner)
+        if cap > 0:
+            sql += " limit ?"
+            args += (cap,)
         with self._lock:
-            rows = self._conn.execute(
-                f"select {_COLS} from memories where bot_id=? and owner_id=?"
-                " and merged_into=0 order by ts asc, id asc limit ?",
-                (str(bot_id), owner, max(1, int(limit))),
-            ).fetchall()
+            rows = self._conn.execute(sql, args).fetchall()
         return [_row_to_memory(r) for r in rows]
 
     async def search_candidates(self, key: MemoryKey, *, query: str,

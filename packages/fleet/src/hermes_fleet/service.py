@@ -315,8 +315,8 @@ class MemoryService:
         return db.stats()
 
     async def export_owner(self, *, platform_id: str, owner_id: str,
-                           max_messages: int = 3000,
-                           max_memories: int = 2000) -> dict:
+                           max_messages: int = 0,
+                           max_memories: int = 0) -> dict:
         """收集「某人 + 某机器人」的全部记忆数据，供导出文档渲染。
 
         取数放在服务层而不是命令里，是因为这是唯一一条把原始对话写到
@@ -324,6 +324,10 @@ class MemoryService:
 
         返回的是**已过滤**的数据——`messages` 里已经没有别人的发言，
         调用方可以直接渲染，不必（也不应该）再做一遍隐私判断。
+
+        `max_messages` / `max_memories` 传 0 表示**全量**。用户明确要求
+        原文有几千万字也照发；条数不再截断，唯一兜底是文件大小上限
+        （在命令层按 UTF-8 字节算，超 100MB 就拒绝发送）。
         """
         from .export import pair_replies
 
@@ -339,24 +343,21 @@ class MemoryService:
         db = self.registry.get(pid)
         bot = self.bot_of(pid)
         resident = await db.resident.list_by_owner(bot, owner)
+        cap_mem = int(max_memories)
         memories = await db.memories.list_by_owner(
-            bot, owner, limit=max(1, int(max_memories))
+            bot, owner, limit=cap_mem if cap_mem > 0 else 0
         )
         total_mem = await db.memories.count_active(bot, owner_id=owner)
         total_msg = await db.messages.count_transcript(bot, owner)
-        # 放大取数窗口：群会话里大量行属于别人，配对时要用它们判断
-        # 「这条机器人回复是回谁的」。窗口太紧会把本人的行也一起挤掉。
-        window = min(20_000, max(1, int(max_messages)) * 8)
-        raw = await db.messages.transcript(bot, owner, limit=window)
+        # 全量取原始行：群会话里别人说的话要参与配对（判断「这条机器人
+        # 回复是回谁的」），不能省；用户要的是全部原文，也不再截条数。
+        raw = await db.messages.transcript(bot, owner, limit=0)
         # 过滤必须在取到完整会话上下文之后做：SQL 里提前滤掉群友的
         # 发言，会让跟在后面的机器人回复被误算成回复本人。
-        kept = pair_replies(raw, owner)[-max(1, int(max_messages)):]
-        # 取数窗口没吃满就说明拿到了全部相关会话行，这时可以直接数过滤后的
-        # 条数：SQL 侧的估算会把「回复群友的话」也算进去，凭空多报一条。
-        total = (
-            len(kept) if len(raw) < window
-            else max(int(total_msg), len(kept))
-        )
+        kept = pair_replies(raw, owner)
+        cap_msg = int(max_messages)
+        if cap_msg > 0:
+            kept = kept[-cap_msg:]
         return {
             "bot_id": pid,
             "owner_id": owner,
@@ -364,7 +365,84 @@ class MemoryService:
             "memories": memories,
             "messages": kept,
             "memory_total": max(int(total_mem), len(memories)),
-            "message_total": total,
+            # 全量取数下 kept 就是准确条数（SQL 的 count 会把回群友的话
+            # 也算进去，反而偏高），不再用估算值兜底。
+            "message_total": len(kept) if cap_msg <= 0 else max(int(total_msg), len(kept)),
+        }
+
+    async def import_owner(self, *, platform_id: str, owner_id: str,
+                           payload: dict) -> dict:
+        """把记忆配置文档解析出的数据导入到**当前**账号/用户下。
+
+        冲突策略明确写在语义里：常驻按 (owner, scope, block) 整段覆盖，
+        归档记忆**追加**为新条目（不按 id 去重——导回的是另一台机器的 id，
+        直接对号入座会串到本机别的记忆上）。所以重复导入同一份文件会
+        得到两份归档条目，这是刻意的：追加语义可预期，去重语义要猜。
+
+        `payload` 来自 `parse_memory_config()`，已经过字段校验。这里再做
+        一次范围校验，防止调用方跳过解析层直接塞脏数据。
+        """
+        pid = str(platform_id or "")
+        owner = str(owner_id or "")
+        if not pid or not owner or not self.registry.has_account(pid):
+            raise ValueError("目标机器人账号不存在")
+        db = self.registry.get(pid)
+        bot = self.bot_of(pid)
+        now = self._now()
+
+        resident = payload.get("resident", [])
+        memories = payload.get("memories", [])
+        if not isinstance(resident, list) or not isinstance(memories, list):
+            raise ValueError("导入数据格式错误")
+
+        n_res = 0
+        for item in resident:
+            try:
+                scope = ResidentScope.parse(str(item.get("scope", "")))
+                block = ResidentBlock(str(item.get("block", "")))
+            except ValueError as exc:
+                raise ValueError(f"常驻词条字段非法：{exc}") from exc
+            text = str(item.get("text", "") or "").strip()
+            entry = ResidentEntry(
+                bot_id=bot, owner_id=owner, scope=scope, block=block,
+                text=text, updated_ts=now,
+            )
+            await db.resident.upsert(entry)  # 空文本 = 清空该槽位
+            n_res += 1
+
+        to_add: list[Memory] = []
+        for item in memories:
+            content = str(item.get("content", "") or "").strip()
+            if not content:
+                continue
+            try:
+                scope = MemoryScope(str(item.get("scope", "user") or "user"))
+                vis = Visibility(str(item.get("visibility", "private") or "private"))
+            except ValueError as exc:
+                raise ValueError(f"归档记忆字段非法：{exc}") from exc
+            group = str(item.get("group_id", "") or "")
+            if scope is MemoryScope.GLOBAL or vis is Visibility.PUBLIC:
+                # 全局/公开记忆需要管理员权限，导入路径一律降级到本人私有：
+                # 否则用户发一份文件就能往所有人的库里写东西。
+                scope = MemoryScope.USER
+                vis = Visibility.PRIVATE
+            to_add.append(Memory(
+                id=MemoryId(0), bot_id=bot, content=content,
+                scope=scope, visibility=vis, owner_id=owner, group_id=group,
+                kind=str(item.get("kind", "fact") or "fact"),
+                source="import",
+                ts=float(item.get("ts", 0.0) or 0.0) or now,
+                updated_ts=now,
+                importance=float(item.get("importance", 0.0) or 0.0),
+            ))
+        if to_add:
+            await db.memories.add_many(to_add)
+
+        return {
+            "bot_id": pid,
+            "owner_id": owner,
+            "resident_imported": n_res,
+            "memories_imported": len(to_add),
         }
 
     async def probe(self, platform_ids: list[str], *, limit: int = 20) -> list[dict]:
