@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "display_name": "Hermes 百账号记忆",
+    "description": "为上百个机器人账号提供互相隔离的长期记忆：每个账号一个独立记忆库"
+  },
+  "views": {
+    "fleet": {
+      "title": "账号台"
+    }
+  }
+}

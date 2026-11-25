@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "display_name": "Hermes Fleet Memory",
+    "description": "Isolated long-term memory for hundreds of bot accounts: one memory database per account"
+  },
+  "views": {
+    "fleet": {
+      "title": "Accounts"
+    }
+  }
+}
