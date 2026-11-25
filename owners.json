@@ -1,0 +1,127 @@
+{
+  "_comment": "模块所有权清单。多 agent 并行开发时，这是唯一的『谁可以改什么』的权威来源。改这个文件本身需要串行。",
+  "version": 1,
+  "frozen": true,
+  "reserved_files": [
+    "owners.json",
+    "pyproject.toml",
+    "run_tests.py",
+    "tools/check_boundaries.py",
+    "tools/verify.py",
+    "packages/contracts/src/hermes_contracts/ids.py",
+    "packages/contracts/src/hermes_contracts/errors.py",
+    "packages/contracts/src/hermes_contracts/models.py",
+    "packages/contracts/src/hermes_contracts/ports.py"
+  ],
+  "reserved_note": "上面这些文件是并行开发的冲突热点。任何 agent 不得直接修改；变更走 docs/02 的契约变更流程（提出 -> 评审 -> 单人执行 -> 广播）。",
+  "packages": {
+    "hermes_contracts": {
+      "owner": "arch",
+      "status": "done",
+      "may_import": ["<stdlib>"],
+      "owns": ["无（纯类型与接口，不持久化任何东西）"],
+      "deliverable": "ids / errors / models / ports / clock + conformance 套件",
+      "test": "python run_tests.py -p contracts",
+      "change_policy": "RFC：改契约会让所有 agent 的测试同时变红，必须串行"
+    },
+    "hermes_recall": {
+      "owner": "recall",
+      "status": "done",
+      "may_import": ["hermes_contracts"],
+      "owns": ["无（纯函数，无状态）"],
+      "deliverable": "从 hermes_core 搬来的 recall.py + adapter（Memory <-> dict）",
+      "test": "python run_tests.py -p recall",
+      "change_policy": "排序数学有大量实测调参，改动必须带对比数据（命中率/注入字数）"
+    },
+    "hermes_memory": {
+      "owner": "memory",
+      "status": "in_progress",
+      "may_import": ["hermes_contracts"],
+      "owns": ["memories", "resident"],
+      "deliverable": "MemoryStore / ResidentStore 实现 + 合并链 + 可见性判定",
+      "test": "python run_tests.py -p memory",
+      "change_policy": "自由（内部实现），但必须保持 conformance 全绿"
+    },
+    "hermes_jobs": {
+      "owner": "jobs",
+      "status": "in_progress",
+      "may_import": ["hermes_contracts"],
+      "owns": ["jobs"],
+      "deliverable": "JobQueue 实现 + 可见性超时 + 死信 + 去重",
+      "test": "python run_tests.py -p jobs",
+      "change_policy": "自由，但必须保持 conformance 全绿"
+    },
+    "hermes_identity": {
+      "owner": "identity",
+      "status": "todo",
+      "may_import": ["hermes_contracts"],
+      "owns": ["identities", "bots"],
+      "deliverable": "IdentityStore 实现 + 最多 5 跳解析 + 防环",
+      "test": "python run_tests.py -p identity",
+      "change_policy": "自由"
+    },
+    "hermes_skill": {
+      "owner": "skill",
+      "status": "todo",
+      "may_import": ["hermes_contracts"],
+      "owns": ["skills"],
+      "deliverable": "SkillStore 实现 + 系统域扫描 + shadow 覆盖",
+      "test": "python run_tests.py -p skill",
+      "change_policy": "自由"
+    },
+    "hermes_llm": {
+      "owner": "llm",
+      "status": "todo",
+      "may_import": ["hermes_contracts"],
+      "owns": ["无（provider 健康状态与冷却，落存储时注入 JobQueue/Meta）"],
+      "deliverable": "错误分类 + 退避 + 令牌桶 + 冷却 + 多 provider 回退",
+      "test": "python run_tests.py -p llm",
+      "change_policy": "退避参数改动必须带压测数据"
+    },
+    "hermes_workers": {
+      "owner": "workers",
+      "status": "todo",
+      "may_import": ["hermes_contracts"],
+      "owns": ["无（编排层，通过端口调别人）"],
+      "deliverable": "summarize / consolidate / maintenance 三类 worker + 分片并发",
+      "test": "python run_tests.py -p workers",
+      "change_policy": "自由，但不得直接 import 任何领域包（只能吃 Protocol）"
+    },
+    "hermes_api": {
+      "owner": "api",
+      "status": "todo",
+      "may_import": ["hermes_contracts"],
+      "owns": ["无（协议适配层）"],
+      "deliverable": "HTTP 接口 + 鉴权 + 错误码映射 + OpenAPI",
+      "test": "python run_tests.py -p api",
+      "change_policy": "自由，接口形状变更要同步通知 client"
+    },
+    "hermes_storage_sqlite": {
+      "owner": "storage",
+      "status": "done",
+      "may_import": ["hermes_contracts"],
+      "owns": ["SQLite 版 DDL", "WAL / synchronous / busy_timeout 等 pragma 配置", "每 bot 一库的连接与文件名规则"],
+      "deliverable": "MemoryStore / ResidentStore / MessageStore / IdentityStore 的 SQLite 实现（单连接+锁、批量提交、FTS5 trigram 粗排）",
+      "test": "python run_tests.py -p storage_sqlite",
+      "change_policy": "改 pragma 或 flush 策略必须重跑 benchmarks/，并更新 docs/03 的数据"
+    },
+    "hermes_fleet": {
+      "owner": "plugin",
+      "status": "in_progress",
+      "may_import": ["<任意 hermes_* 包：本包是唯一组装根，已在 check_boundaries 显式登记>"],
+      "owns": ["platform_id -> 库文件的路由", "注入块内容与预算", "工具措辞", "BotRegistry 的 LRU 与 purge"],
+      "deliverable": "插件业务层（不 import astrbot）：Scene 解析、注入块、落库、检索、工具语义；main.py 只做事件翻译",
+      "test": "python run_tests.py -p fleet",
+      "change_policy": "改注入措辞或工具描述必须同步 tests/integration 里的断言；不得在此层 import astrbot"
+    },
+    "hermes_storage_pg": {
+      "owner": "storage",
+      "status": "todo",
+      "may_import": ["hermes_contracts"],
+      "owns": ["DDL 与迁移脚本"],
+      "deliverable": "各 Store 的 Postgres 实现，复用同一批 conformance 套件",
+      "test": "python run_tests.py -p storage",
+      "change_policy": "迁移脚本只增不改（已发布的迁移不得编辑）"
+    }
+  }
+}

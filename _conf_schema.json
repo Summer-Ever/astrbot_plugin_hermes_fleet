@@ -1,0 +1,38 @@
+{
+  "memory_injection": {
+    "type": "bool",
+    "default": true,
+    "description": "每轮注入常驻设定",
+    "hint": "把称呼、用户信息、偏好、回复风格、规则等六个词条拼成一段临时上下文插到本轮请求里。不落会话历史，不影响提示词缓存。"
+  },
+  "capture_messages": {
+    "type": "bool",
+    "default": true,
+    "description": "记录会话原文",
+    "hint": "每轮把用户发言与机器人回复写进该账号自己的消息表。这是后续自动总结的原料，关掉等于只保留手动保存的记忆。"
+  },
+  "bot_db_dir": {
+    "type": "string",
+    "default": "",
+    "description": "记忆库根目录",
+    "hint": "留空使用插件数据目录下的 bots/。每个机器人账号在这里有一个独立的 .db 文件，账号之间物理隔离。改动前请先备份。"
+  },
+  "max_open_bots": {
+    "type": "int",
+    "default": 24,
+    "description": "同时打开的账号库上限",
+    "hint": "上百个账号若全部常驻连接会白占内存与页缓存。超出上限时按最近最少使用关闭，下次访问再打开（冷启动一个库实测约 7.6ms）。建议值 16～32。"
+  },
+  "recall_k": {
+    "type": "int",
+    "default": 5,
+    "description": "每次检索返回条数",
+    "hint": "search_memory 检索后精排保留的条数。调大会把更多弱相关记忆塞进上下文，反而干扰回答。建议 3～8。"
+  },
+  "group_private_memory": {
+    "type": "bool",
+    "default": false,
+    "description": "允许在群聊引用本人的私聊记忆",
+    "hint": "默认关闭。群里的回复是当众的，一旦注入就等于当众公开私事。只在确认群内全是熟人时打开。"
+  }
+}

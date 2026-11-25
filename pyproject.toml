@@ -1,0 +1,47 @@
+[project]
+name = "hermes-platform"
+version = "0.1.0"
+description = "多租户聊天记忆平台（采集侧薄插件 + 无状态记忆服务 + Worker 池）"
+requires-python = ">=3.11"
+dependencies = []
+
+# 注意：这里**故意不配 build-system**。
+# 本仓库在开发阶段靠 sys.path 注入（见 run_tests.py）而不是 pip install -e，
+# 因为多 agent 沙箱不保证有网络或构建后端。
+# 等要出产物（wheel/docker 镜像）时再加，那时依赖已经确定。
+
+[tool.pytest.ini_options]
+# 装了 pytest 也建议用 `python run_tests.py`（零依赖）。这里配好是为了
+# IDE 一键跑测试、以及想要 pytest 的高级特性（xdist / --lf）时能直接用。
+pythonpath = [
+  "packages/contracts/src",
+  "packages/recall/src",
+  "packages/memory/src",
+  "packages/jobs/src",
+  "packages/identity/src",
+  "packages/skill/src",
+  "packages/llm/src",
+  "packages/workers/src",
+  "packages/api/src",
+  "packages/storage_pg/src",
+  "apps/astrbot_client/src",
+]
+# importlib 模式避免「两个 tests 目录同名」导致的 import file mismatch
+importmode = "importlib"
+testpaths = ["packages", "tests"]
+# 一致性套件的基类靠 __test__ = False 排除，这里再兜一层
+python_classes = ["Test*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+  "E501",  # 行宽交给 formatter；中文注释按字符算容易误报
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 一致性套件里的方法名带 test_ 前缀是 unittest 的硬要求
+"packages/contracts/src/hermes_contracts/conformance/*.py" = ["N802"]

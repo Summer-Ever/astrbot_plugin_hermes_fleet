@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 插件运行时数据（记忆库、日志、导出）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 基准与测试产物
+benchmarks/out/
+.pytest_cache/
+.mypy_cache/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
