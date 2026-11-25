@@ -73,6 +73,60 @@
     return m === "no-bridge" ? "面板桥接未就绪，请刷新页面" : m;
   }
 
+  /** 就地编辑：把 node 换成输入框，回车/失焦保存，Esc 取消。
+   *
+   *  用插入而非 replaceChild，是为了「取消」时能把原节点原样还回去——
+   *  备注为空时原来显示的是账号 ID，取消后必须回到 ID，不能变成空白。
+   */
+  function inlineEdit(node, value, opts) {
+    const o = opts || {};
+    if (!node || node._editing) return;
+    node._editing = true;
+
+    const input = el("input", "input inline-input");
+    input.value = value || "";
+    input.placeholder = o.placeholder || "";
+    if (o.maxlength) input.maxLength = o.maxlength;
+    // 行点击会跳到详情页；点输入框不能跳。
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("mousedown", (e) => e.stopPropagation());
+
+    node.classList.add("hidden");
+    node.parentNode.insertBefore(input, node);
+    input.focus();
+    if (input.select) input.select();
+
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      node._editing = false;
+      const next = input.value;
+      if (input.parentNode) input.parentNode.removeChild(input);
+      node.classList.remove("hidden");
+      if (save && o.onSave) o.onSave(next);
+      else if (o.onCancel) o.onCancel();
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+
+  /** 保存备注，并同步内存里的列表项与告警项（免得两处显示不一致）。 */
+  async function saveNote(pid, value) {
+    const r = await apiPost("notes", { platform_id: pid, note: value });
+    const note = (r && r.note) || "";
+    state.accounts.rows.forEach((row) => {
+      if (row.platform_id === pid) row.note = note;
+    });
+    state.alerts.forEach((a) => {
+      if (a.platform_id === pid) a.note = note;
+    });
+    return note;
+  }
+
   // ---------------------------------------------------------------- 状态
 
   const state = {
@@ -131,7 +185,10 @@
 
     shown.forEach((a) => {
       const row = el("div", "alert " + (a.level === "error" ? "error" : "warn"));
-      row.appendChild(el("span", "who", a.platform_id || "(未知账号)"));
+      // 有备注就显示备注：告警条上写着一串适配器 id，等于让人自己去对表格。
+      const who = el("span", "who", a.note || a.platform_id || "(未知账号)");
+      who.title = a.platform_id || "";
+      row.appendChild(who);
       row.appendChild(el("span", "msg", a.message));
       box.appendChild(row);
     });
@@ -180,8 +237,42 @@
       }
 
       const tdName = el("td", "w-40p");
-      tdName.appendChild(el("div", "pid mono", it.platform_id || "(索引缺失)"));
-      tdName.appendChild(el("div", "stem mono", it.file || it.stem));
+      const head = el("div", "acc-head");
+      // 显示顺序：有备注就主显备注，没有就把 ID 顶上来——备注是别名，
+      // 不是替代品，改完不该让人找不到这个账号到底叫什么。
+      const nameEl = el("span", "acc-name" + (it.note ? "" : " unnamed"),
+                        it.note || it.platform_id || "(索引缺失)");
+      head.appendChild(nameEl);
+      if (it.platform_id) {
+        const btn = el("button", "note-btn", it.note ? "改" : "备注");
+        btn.type = "button";
+        btn.title = it.note ? "修改备注" : "起一个备注（只影响显示，不改账号 ID）";
+        btn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          inlineEdit(nameEl, it.note || "", {
+            maxlength: 40,
+            placeholder: "例如：客服号（测试）",
+            onSave: async (val) => {
+              try {
+                const note = await saveNote(it.platform_id, val);
+                toast(note ? "备注已保存：" + note : "备注已清除");
+              } catch (err) {
+                toast("保存备注失败：" + errMsg(err), true);
+              }
+              renderTable(state.accounts.rows);
+              renderAlerts(state.alerts);
+            },
+          });
+        });
+        head.appendChild(btn);
+      }
+      tdName.appendChild(head);
+      // 有备注时第二行同时给 ID 与文件名：备注是给人看的，排障时还得看真身。
+      tdName.appendChild(el(
+        "div", "stem mono",
+        it.note ? (it.platform_id + " · " + (it.file || it.stem))
+                : (it.file || it.stem),
+      ));
       tr.appendChild(tdName);
 
       tr.appendChild(el("td", "num w-90", it.size_text));
@@ -406,7 +497,7 @@
   // 暴露给其他页面文件
   window.Fleet = {
     apiGet, apiPost, el, clear, toast, relTime, fullTime, num, errMsg, state, pages,
-    loadHealth,
+    inlineEdit, saveNote, loadHealth,
   };
 
   if (document.readyState === "loading") {

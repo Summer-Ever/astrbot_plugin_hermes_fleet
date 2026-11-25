@@ -54,6 +54,8 @@ class FleetWebAPI:
              "单账号详情：常驻六席与记忆统计"),
             (f"{self.prefix}/probe", self.probe, ["POST"],
              "批量取真实统计（有上限，用完立即关库）"),
+            (f"{self.prefix}/notes", self.note_save, ["POST"],
+             "给账号起备注（显示用别名，不影响 platform_id 与库文件）"),
             # ---- 下钻页：进去之后才是 hermes_core 那种内容管理 ----
             (f"{self.prefix}/scopes", self.scopes, ["GET"],
              "该账号下的记忆作用域清单（谁、哪个群、各多少条）"),
@@ -76,6 +78,10 @@ class FleetWebAPI:
             # ---- 全局：模型链与设置 ----
             (f"{self.prefix}/models", self.models, ["GET"],
              "降级链、累计计数、最近调用日志"),
+            (f"{self.prefix}/providers", self.providers, ["GET"],
+             "主应用里已配置的模型清单（供挑选总结模型）"),
+            (f"{self.prefix}/models/chain", self.model_chain_save, ["POST"],
+             "保存后台总结模型链（主模型 + 降级），立即生效"),
             (f"{self.prefix}/models/test", self.models_test, ["POST"],
              "逐个模型发一次最小请求，测连通性"),
             (f"{self.prefix}/config", self.config_get, ["GET"],
@@ -227,10 +233,43 @@ class FleetWebAPI:
         return json_response({
             "platform_id": pid,
             "file": file_name,
+            "note": self.plugin.registry.note_of(pid),
             "stats": stats,
             "resident": resident,
             "resident_hint": "常驻按「私聊」场景读取；群场景的常驻各自独立，"
                              "不在本页展示。",
+        })
+
+    async def note_save(self):
+        """给账号起/改/清备注。
+
+        备注存在 `_notes.json` 里，**不碰库、不碰文件名**：`platform_id` 是
+        适配器 id，改它等于换账号（记忆会「消失」）；文件名里的 hash 变了
+        索引就和磁盘对不上。所以备注只能是显示层的别名。
+
+        允许对还没落库的账号写备注（先起名、等它说话是正常顺序），
+        但列表只按库文件出行，所以在那之前它不会凭空多出一行。
+        """
+        from hermes_fleet.registry import MAX_NOTE
+
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        if not pid:
+            return self._fail("缺少 platform_id")
+        raw = str(body.get("note") or "")
+        if len(raw) > MAX_NOTE * 4:
+            # 前端有 maxlength，但接口不能指望前端。直接拒掉超长输入，
+            # 比悄悄截断更诚实——截断后用户会以为自己存进去了。
+            return self._fail(f"备注太长（最多 {MAX_NOTE} 个字符）")
+        try:
+            note = self.plugin.registry.set_note(pid, raw)
+        except Exception:
+            logger.error(f"[hermes_fleet] 保存 {pid} 备注失败:\n{_tb()}")
+            return self._fail("写入备注失败，详见插件日志", 500)
+        return json_response({
+            "platform_id": pid,
+            "note": note,
+            "trimmed": raw.strip() != note,
         })
 
     async def probe(self):
@@ -496,7 +535,7 @@ class FleetWebAPI:
     # ------------------------------------------------------------------ 模型
 
     async def models(self):
-        """降级链 + 累计计数 + 最近调用日志。
+        """降级链 + 配置意图 + 候选清单 + 累计计数 + 最近调用日志。
 
         `FallbackProvider.log` 是内存里的环形缓冲（64 条），重启即清空——
         这是刻意的：模型故障是「当下能不能干活」的问题，把历史日志落盘
@@ -517,9 +556,24 @@ class FleetWebAPI:
                 "latency_ms": round(float(getattr(item, "latency_ms", 0) or 0), 1),
                 "detail": str(getattr(item, "detail", ""))[:300],
             })
+        # 配置意图与候选清单是「诊断视图」的一部分：只看链上现在跑的是什么
+        # 不够，还要能看出它是不是跟着主应用漂移、以及能换成哪些。
+        # 这两段取不到时留空，不能让整个诊断页 500。
+        configured: dict = {}
+        catalog: list[dict] = []
+        try:
+            configured = self.plugin.chain_config()
+        except Exception:
+            logger.warning(f"[hermes_fleet] 读取模型链配置失败:\n{_tb()}")
+        try:
+            catalog, _ = self.plugin.providers_catalog()
+        except Exception:
+            logger.warning(f"[hermes_fleet] 读取主应用模型清单失败:\n{_tb()}")
         return json_response({
             "chain": provider.chain(),
             "summary": provider.summary(),
+            "configured": configured,
+            "catalog": catalog,
             "stats": {
                 "calls": int(getattr(stats, "calls", 0) or 0),
                 "failures": int(getattr(stats, "failures", 0) or 0),
@@ -527,6 +581,94 @@ class FleetWebAPI:
                 "by_kind": dict(getattr(stats, "by_kind", {}) or {}),
             },
             "log": log,
+        })
+
+    async def providers(self):
+        """主应用里**已配置**的对话模型清单。
+
+        只读：这里不修改 AstrBot 的任何配置。候选从主应用来，但「用哪个」
+        由本插件自己的配置决定——这就是「解耦但不出圈」。
+        """
+        from hermes_fleet.chain import SOURCE_LABELS
+
+        try:
+            rows, current = self.plugin.providers_catalog()
+        except Exception:
+            logger.error(f"[hermes_fleet] 读取模型清单失败:\n{_tb()}")
+            return self._fail("读取主应用的模型清单失败，详见插件日志", 500)
+        configured = {}
+        try:
+            configured = self.plugin.chain_config()
+        except Exception:
+            pass
+        source = str(configured.get("source") or "current")
+        return json_response({
+            "items": rows,
+            "current": current,
+            "configured": configured,
+            "source": source,
+            "source_text": SOURCE_LABELS.get(source, source),
+            "readable": bool(rows),
+            "hint": "清单来自 AstrBot 主应用已配置的服务提供商；"
+                    "改主应用的默认模型不会影响这里已选定的链。",
+        })
+
+    async def model_chain_save(self):
+        """保存「总结用」模型链（主模型 + 降级），并立刻生效。
+
+        三个约束都要在服务端做，不能只靠前端：
+        1. 只接受主应用里真实存在的 provider id（写错一个字符不报错，
+           只会在半夜的总结里静默失败）；
+        2. 主模型不能同时出现在降级里；
+        3. 保存后立即重建 provider，并换掉后台任务手里的引用——
+           否则就是「保存了，但总结还在用旧模型」。
+        """
+        from hermes_fleet import chain as chain_mod
+
+        body = await self._body()
+        if "primary" not in body and "fallbacks" not in body:
+            return self._fail("缺少 primary / fallbacks")
+
+        try:
+            rows, _ = self.plugin.providers_catalog()
+        except Exception:
+            rows = []
+        # 拿不到清单（主应用还没启动完）时 available=None：只校验格式，
+        # 不拦 id。宁可放过一次，也不要把人的配置锁死在错误里。
+        available = {r["id"] for r in rows} if rows else None
+        try:
+            ids = chain_mod.validate(
+                body.get("primary"), body.get("fallbacks"), available)
+        except ValueError as exc:
+            return self._fail(str(exc))
+
+        stored = ",".join(ids)
+        try:
+            self.plugin.config.update({"llm_provider_ids": stored})
+            await self.plugin.config.save_config_async()
+        except Exception:
+            logger.error(f"[hermes_fleet] 保存模型链失败:\n{_tb()}")
+            return self._fail("写入配置文件失败，请查看后端日志", 500)
+
+        try:
+            self.plugin.rebuild_provider()
+        except Exception:
+            logger.error(f"[hermes_fleet] 重建模型链失败:\n{_tb()}")
+            # 配置已经落盘了，只是这一轮没热切换成功。如实告诉调用方：
+            # 重载插件即可生效，不要报成「保存失败」让人重做一遍。
+            return json_response({
+                "stored": stored,
+                "applied": False,
+                "chain": [chain_mod.label(x) for x in ids],
+                "message": "配置已保存，但热切换失败；重载插件后生效。",
+            })
+
+        return json_response({
+            "stored": stored,
+            "applied": True,
+            "chain": [chain_mod.label(x) for x in ids],
+            "configured": self.plugin.chain_config(),
+            "message": "已保存并立即生效（无需重载插件）。",
         })
 
     async def models_test(self):

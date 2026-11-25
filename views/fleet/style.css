@@ -195,6 +195,30 @@ button, input, select { font: inherit; color: inherit; }
 .pid { font-weight: 600; }
 .stem { color: var(--faint); font-size: 11.5px; }
 
+/* 账号名 + 备注：备注是主显示，ID 退到第二行。
+   没备注时 ID 顶上来但褪成次要色，视觉上区分「人起的名字」与「系统 id」。 */
+.acc-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.acc-name {
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 100%;
+}
+.acc-name.unnamed {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; font-weight: 600;
+}
+.note-btn {
+  flex: 0 0 auto; padding: 0 6px; height: 20px; line-height: 1;
+  font-size: 11px; color: var(--muted); background: transparent;
+  border: 1px dashed var(--border); border-radius: 6px; cursor: pointer;
+  opacity: .45; transition: .12s;
+}
+/* 淡显而非隐藏：全隐藏等于没人会发现这个功能；太显眼又会把表格搅得很吵。 */
+.table tbody tr:hover .note-btn,
+.note-btn:focus-visible { opacity: 1; }
+.note-btn:hover { color: var(--accent); border-color: var(--accent); }
+.inline-input { padding: 2px 6px; font-size: 12.5px; width: 100%; max-width: 260px; }
+.title-row { display: flex; align-items: center; gap: 10px; }
+
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dash { color: var(--faint); }
 
@@ -430,6 +454,28 @@ button, input, select { font: inherit; color: inherit; }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover:not(:disabled) { border-color: var(--danger); }
 .tiny-input { padding: 3px 6px; font-size: 12px; }
+
+/* ---------------------------------------------------------------- 模型链编辑器 */
+
+.notice {
+  margin: 0 0 12px; padding: 9px 12px; border-radius: 9px;
+  background: var(--warn-soft); color: var(--warn);
+  border: 1px solid var(--border);
+  font-size: 12.5px; line-height: 1.55;
+}
+.chain-form { display: flex; flex-direction: column; gap: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+.chain-fb { display: flex; flex-direction: column; gap: 6px; }
+.fb-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel-2);
+}
+.fb-idx {
+  flex: 0 0 18px; text-align: center; color: var(--faint); font-size: 11.5px;
+}
+.fb-row .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 
 /* ---------------------------------------------------------------- 弹窗 */
 

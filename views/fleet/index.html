@@ -60,7 +60,7 @@
         <section class="alerts" id="alerts"></section>
 
         <section class="toolbar">
-          <input class="input grow" id="q" type="search" placeholder="按账号 ID 或文件名搜索" />
+          <input class="input grow" id="q" type="search" placeholder="按备注、账号 ID 或文件名搜索" />
           <select class="input" id="sort">
             <option value="recent">最近写入</option>
             <option value="size">占用最大</option>
@@ -75,7 +75,7 @@
           <table class="table">
             <thead>
               <tr>
-                <th class="w-40p">账号</th>
+                <th class="w-40p">账号 / 备注</th>
                 <th class="w-90">占用</th>
                 <th class="w-130">最后写入</th>
                 <th class="w-80">记忆</th>
@@ -108,7 +108,10 @@
 
         <header class="detail-head">
           <div>
-            <h1 id="d-title" class="mono">—</h1>
+            <div class="title-row">
+              <h1 id="d-title">—</h1>
+              <button class="btn tiny ghost" id="d-note-edit">改备注</button>
+            </div>
             <p class="dim mono" id="d-file">—</p>
           </div>
           <div class="kpis" id="d-kpis"></div>
@@ -204,6 +207,34 @@
           <div class="chain" id="model-chain"></div>
           <div class="hint" id="model-summary">—</div>
           <div class="test-result" id="model-test-result"></div>
+        </section>
+
+        <section class="panel pad">
+          <div class="panel-head">
+            <h2 class="pane-title">后台总结模型</h2>
+            <span class="hint">总结与整理用这条链，与主应用的默认模型解耦</span>
+          </div>
+          <div class="notice hidden" id="chain-warn"></div>
+          <div class="chain-form">
+            <label class="field">
+              <span class="field-label">主模型</span>
+              <select class="input" id="chain-primary"></select>
+              <span class="hint" id="chain-primary-hint">—</span>
+            </label>
+            <div class="field">
+              <span class="field-label">降级顺序（前一个失败才换下一个）</span>
+              <div class="chain-fb" id="chain-fallbacks"></div>
+              <div class="toolbar">
+                <select class="input grow" id="chain-add-sel"></select>
+                <button class="btn tiny" id="chain-add">添加降级</button>
+              </div>
+            </div>
+          </div>
+          <div class="toolbar right">
+            <span class="hint grow" id="chain-msg"></span>
+            <button class="btn ghost" id="chain-reset">还原</button>
+            <button class="btn primary" id="chain-save">保存并生效</button>
+          </div>
         </section>
         <section class="panel pad">
           <h2 class="pane-title">累计计数</h2>

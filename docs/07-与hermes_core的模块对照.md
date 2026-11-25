@@ -18,8 +18,8 @@
 | 常驻记忆 | `resident` 表 + `RESIDENT_BLOCKS` 六席（`db.py`） | `ResidentBlock` 六席 + `set_resident` | **照搬设计** |
 | 记忆检索 | `modules/recall.py` 880 行 | `hermes_recall` 1006 行（整份搬迁 + v0.3.0 重写排序） | 搬迁 + 重写 |
 | 记忆存储 | `modules/db.py` 2062 行，单库 | `store.py` 474 + `botdb.py` 430，**一 bot 一库** | **重写** |
-| 模型路由 | `modules/router.py` 904 行 | `fallback.py` 380 行 | **重写（本轮补上）** |
-| WebUI | `views/hermes/` 2769 行 + `webapi.py` 959 行（7 tab / 30 接口） | `views/fleet/` 5 文件 + `webapi.py` 17 接口（全局 3 页 + 单账号 4 tab） | **重写（不照搬 tab 结构）** |
+| 模型路由 | `modules/router.py` 904 行，跟随全局默认模型 | `fallback.py` 380 行 + `chain.py` 显式链，与主应用解耦 | **重写（v0.7 解耦）** |
+| WebUI | `views/hermes/` 2769 行 + `webapi.py` 959 行（7 tab / 30 接口） | `views/fleet/` 6 文件 + `webapi.py` 20 接口（全局 3 页 + 单账号 4 tab） | **重写（不照搬 tab 结构）** |
 | 技能系统 | `modules/skill_hub.py` 322 行 + 4 个工具 | **无** | 刻意不做 |
 | 热重载 | `hot_reload.py` 155 行 | **无** | 未做 |
 | 后台总结/整理 | 散在 `main.py` 里 | `hermes_workers` 四个模块 + 契约解耦 | **重写** |
@@ -133,11 +133,11 @@
     └─ 设置（新）                  ├─ 未总结：按会话分组，看得见卡在哪
                                    └─ 操作：立刻总结
 
-接口从 4 个（全只读）扩到 17 个：
+接口从 4 个（全只读）扩到 20 个：
 
 | 类别 | 接口 |
 |---|---|
-| 全局 | `overview` `health` `probe` `models` `models/test` `config` `config/save` |
+| 全局 | `overview` `health` `probe` `notes` `providers` `models` `models/chain` `models/test` `config` `config/save` |
 | 下钻 | `account` `scopes` `memories` `memories/update` `memories/delete` `memories/merge` `resident` `resident/save` `messages` `actions/summarize` |
 
 几个关键取舍：
@@ -162,6 +162,45 @@
 
 **仍未做**：按 `platform_id` 白名单鉴权（多管理员下是越权面）、删除整个账号、
 批量导出、技能系统。
+
+---
+
+## 3.1 账号备注：core 没有，fleet 必须有
+
+core 只有一个 bot，账号名就是面板里那个适配器 id。fleet 有 100 个库，文件名是
+`qq-01-a1b2c3d4.db` 这种不可逆的 slug+hash，**光看 id 认不出是谁**——「哪个是
+客服号、哪个是测试号」是每天都要回答的问题，而 core 从不需要回答它。
+
+所以备注不是抄 core，是百账号场景带出来的新需求：
+
+| 决定 | 理由 |
+|---|---|
+| 存 `_notes.json`，不进库 | 备注是显示层别名。进库意味着每个库都要多一张表、多一次迁移 |
+| **不改文件名、不改 platform_id** | 改 id 等于换账号（记忆会「消失」）；改 hash 会让索引与磁盘对不上 |
+| 允许给还没落库的账号起备注 | 「先起名、等它说话」是正常顺序；列表只按 `.db` 出行，不会凭空多一行 |
+| 删号时一起清备注 | 否则同 id 重建的账号会继承一个不属于它的名字 |
+| 搜索/排序都覆盖备注 | 起完名字却搜不到、按名称排了还是乱序，都是同一种「口径不一致」 |
+| 告警条显示备注 | 告警上写一串适配器 id，等于让人自己去对表格 |
+
+## 3.2 后台总结模型：从「跟着主应用走」改成「显式选」
+
+**改之前**：`llm_provider_ids` 留空 = 跟随 AstrBot 当前对话模型。小规模省事，
+但它意味着主应用换一次默认模型，**长期记忆的归纳风格就静默漂移一次**，
+事后无法归因是哪次切换让记忆变了味——而记忆恰恰是「越稳定越有用」的东西。
+
+**改之后**（`hermes_fleet/chain.py` + 管理台「模型链」页）：
+
+- 候选**只从主应用已配置的服务提供商里选**（`context.get_all_providers()`），
+  记忆系统不自己维护模型清单，也不改主应用的任何配置。
+- 选定后写进本插件自己的配置，主应用换默认模型**不再影响**它。
+- 主模型 + 最多 4 个降级，顺序即优先级；`__current__` 是显式写法的
+  「跟随当前」，与「没配置」区分开——前者是主动选择，后者页面标警告。
+- 保存时服务端校验：模型必须在主应用里存在、主模型不能同时出现在降级里、
+  降级不超过 4 个。写错一个字符的代价是半夜的总结静默失败，必须当场拦住。
+- 保存后**立即重建** `FallbackProvider` 并换掉 `summarizer.llm` /
+  `consolidator.llm` 的引用，不需要重载插件。旧实例的冷却表一起丢弃：
+  否则新选的主模型一上来就背着前一个模型的冷却。
+- 拿不到候选清单时（AstrBot 未启动完）只校验格式，不锁死人的配置。
 
 
 ---

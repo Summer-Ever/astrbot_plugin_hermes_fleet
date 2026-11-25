@@ -31,6 +31,8 @@
 
   const st = {
     pid: "",
+    note: "",
+    file: "",
     stats: null,
     scopes: [],
     scope: null,      // 当前选中的作用域 {scope, owner_id, group_id, count}
@@ -68,8 +70,9 @@
 
   function renderHead() {
     $("d-pid").textContent = st.pid;
-    $("d-title").textContent = st.pid;
-    $("d-file").textContent = st.file || "";
+    // 有备注就主显备注（人认名字不认适配器 id），ID 留在面包屑和下面那行。
+    $("d-title").textContent = st.note || st.pid;
+    $("d-file").textContent = st.note ? (st.pid + " · " + (st.file || "")) : (st.file || "");
 
     const box = $("d-kpis");
     clear(box);
@@ -89,6 +92,7 @@
     const info = $("d-info");
     clear(info);
     [
+      ["备注", st.note || "（未设置）"],
       ["账号 ID", st.pid],
       ["库文件", st.file || "—"],
       ["记忆条数", num(s.memories)],
@@ -616,6 +620,7 @@
     try {
       const d = await apiGet("account", { platform_id: pid });
       st.stats = d.stats || null;
+      st.note = d.note || "";
       st.file = (d.file || "").replace(/\.db$/, "") || st.file || "";
       renderHead();
     } catch (err) {
@@ -640,6 +645,24 @@
     $("btn-res-save").addEventListener("click", saveResident);
     $("btn-msg").addEventListener("click", loadMessages);
     $("btn-summarize").addEventListener("click", runSummarize);
+
+    // 备注就在标题上改：改完不用回列表确认，标题当场变。
+    $("d-note-edit").addEventListener("click", () => {
+      const title = $("d-title");
+      F.inlineEdit(title, st.note, {
+        maxlength: 40,
+        placeholder: "例如：客服号（测试）",
+        onSave: async (val) => {
+          try {
+            st.note = await F.saveNote(st.pid, val);
+            toast(st.note ? "备注已保存：" + st.note : "备注已清除");
+          } catch (err) {
+            toast("保存备注失败：" + errMsg(err), true);
+          }
+          renderHead();
+        },
+      });
+    });
 
     $("res-owner").addEventListener("change", (e) => {
       st.resOwner = e.target.value;

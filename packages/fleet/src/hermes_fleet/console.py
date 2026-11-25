@@ -22,10 +22,13 @@ import time
 from typing import Any, Iterable, Sequence
 
 # 排序键 → 取值函数。都是纯文件元数据，不查库。
+# 「按名称」用备注优先：页面上那一列显示的就是备注（没备注才显示 id），
+# 排序口径必须和眼睛看到的一致，否则会出现「按名称排了但还是乱序」。
 _SORTS = {
     "recent": lambda r: -(r.get("last_write_at") or 0.0),
     "size": lambda r: -(r.get("size_bytes") or 0) - (r.get("wal_bytes") or 0),
-    "name": lambda r: str(r.get("platform_id") or r.get("stem") or "").lower(),
+    "name": lambda r: str(r.get("note") or r.get("platform_id")
+                          or r.get("stem") or "").lower(),
 }
 
 SORTS = tuple(_SORTS)
@@ -65,7 +68,11 @@ def accounts_view(
     for r in rows:
         pid = str(r.get("platform_id") or "")
         stem = str(r.get("stem") or "")
-        if q and q not in pid.lower() and q not in stem.lower():
+        note = str(r.get("note") or "")
+        # 搜索必须覆盖备注：一旦给账号起了「客服号」这种名字，没人会记得
+        # 它的适配器 id 是什么，只按 id 搜等于搜不到自己刚起的名。
+        if q and q not in pid.lower() and q not in stem.lower() \
+                and q not in note.lower():
             continue
         size = int(r.get("size_bytes") or 0)
         wal = int(r.get("wal_bytes") or 0)
@@ -75,6 +82,7 @@ def accounts_view(
             "platform_id": pid,
             "stem": stem,
             "file": r.get("file") or "",
+            "note": note,
             "size_bytes": size,
             "wal_bytes": wal,
             "size_text": _human_bytes(size + wal),
@@ -130,16 +138,19 @@ def _alerts(items: Sequence[dict], *, stale_days: float) -> list[dict]:
         if i["orphan"]:
             out.append({
                 "level": "error", "code": "orphan", "platform_id": i["platform_id"],
+                "note": i.get("note") or "",
                 "message": f"库文件 {i['file']} 不在索引里，任何流程都读不到它",
             })
         elif i["missing"]:
             out.append({
                 "level": "error", "code": "missing", "platform_id": i["platform_id"],
+                "note": i.get("note") or "",
                 "message": "账号在索引里，但库文件不见了（被删或盘故障）",
             })
         elif i["stale"]:
             out.append({
                 "level": "warn", "code": "stale", "platform_id": i["platform_id"],
+                "note": i.get("note") or "",
                 "message": f"已 {i['age_days']} 天没有新数据（阈值 {stale_days:g} 天）",
             })
     out.sort(key=lambda a: (LEVEL_ORDER.get(a["level"], 9), a["platform_id"]))
@@ -241,6 +252,7 @@ def health_view(
             [
                 {
                     "platform_id": a.get("platform_id") or a.get("stem") or "",
+                    "note": a.get("note") or "",
                     "file": a.get("file") or "",
                     "orphan": bool(a.get("orphan")),
                     "missing": bool(a.get("missing")),

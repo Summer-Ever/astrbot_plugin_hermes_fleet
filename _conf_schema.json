@@ -50,13 +50,13 @@
   "llm_provider_id": {
     "type": "string",
     "default": "",
-    "description": "主模型 ID（单值，兼容旧配置）",
-    "hint": "留空则跟随当前对话模型。建议显式指定：长期记忆的归纳风格不宜随主体换模型而漂移，事后也没法归因。配了下面的「降级链」时，这里留空即可，链里第一个就是主模型。"
+    "description": "主模型 ID（旧的单值配置）",
+    "hint": "兼容旧版的单值字段。管理台「模型链」页现在可以直选主模型 + 降级，保存时只会写 llm_provider_ids；这个字段只在链为空时才算数。"
   },
   "llm_provider_ids": {
     "type": "string",
-    "description": "降级链（逗号分隔的模型 ID，第一个是主模型）",
-    "hint": "例：deepseek/deepseek-flash,zhipu/glm-4.7-flash,openrouter/nemotron。留空则只用上面那一个，或跟随 AstrBot 当前对话模型。后台总结用户看不见，主模型挂掉时靠这条链兜底。",
+    "description": "后台总结模型链（主模型 + 降级，逗号分隔）",
+    "hint": "顺序即优先级，第一个是主模型。建议在管理台「模型链」页里挑（候选取自主应用已配置的服务提供商，保存后立即生效、无需重载）。填 __current__ 表示跟随主应用当前对话模型——那是耦合状态，页面会标警告：主应用换默认模型时，记忆的归纳风格会跟着变且无法归因。",
     "default": ""
   },
   "llm_retry_times": {

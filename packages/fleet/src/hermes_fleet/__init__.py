@@ -5,15 +5,25 @@
 所以「谁依赖谁」是可穷举的。
 """
 
-from . import admin, settings
-from .registry import BotRegistry, UNKNOWN_BOT, bot_file_stem, bot_id_of
+from . import admin, chain, settings
+from .registry import (
+    MAX_NOTE,
+    BotRegistry,
+    UNKNOWN_BOT,
+    bot_file_stem,
+    bot_id_of,
+    normalize_note,
+)
 from .service import BLOCK_LABELS, INJECT_HEADER, MAINT_NOTES, MemoryService, Scene
 
 __all__ = [
     "admin",
+    "chain",
     "settings",
     "BotRegistry",
     "UNKNOWN_BOT",
+    "MAX_NOTE",
+    "normalize_note",
     "bot_file_stem",
     "bot_id_of",
     "MemoryService",

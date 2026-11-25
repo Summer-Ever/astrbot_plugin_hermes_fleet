@@ -25,6 +25,49 @@ UNKNOWN_BOT = "default"
 # 而 AstrBot 的适配器 id 是用户自己填的，什么都可能出现。
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# 备注：给人看的名字，与 `platform_id` 分开存。
+#
+# 为什么不写进库、也不改文件名：`platform_id` 是适配器 id，改名等于换账号
+# （记忆会「消失」）；文件名里的 hash 一旦变了，索引和磁盘就对不上。备注
+# 只是显示层的别名，所以单独一个 json，删库、换库都不影响它。
+# 长度上限 40 字符：够写「客服机器人（测试）」，再长会把表格挤变形。
+NOTES_FILE = "_notes.json"
+MAX_NOTE = 40
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+_SPACES = re.compile(r"\s+")
+
+
+def normalize_note(text: object) -> str:
+    """把任意输入压成一行备注。
+
+    控制字符必须替换掉：备注会被渲染进页面和告警条，一条带 `\x00` 或换行的
+    备注会把整张表格的排版打乱，而这类脏数据最常来自粘贴。
+    """
+    raw = _CONTROL.sub(" ", str(text if text is not None else ""))
+    return _SPACES.sub(" ", raw).strip()[:MAX_NOTE]
+
+
+def _atomic_json(path: str, data: dict) -> None:
+    """写 json：先写临时文件再 rename。
+
+    直接覆盖时若进程被 kill，会留下半个 JSON，下次启动整张表读不出来。
+    索引和备注都是「丢了就等于不认识自己的数据」，所以都走这条路径。
+    """
+    import json
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(data, fp, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
 
 def bot_file_stem(platform_id: str) -> str:
     """把适配器 id 变成稳定、可读、不会撞的文件名主干。
@@ -65,6 +108,8 @@ class BotRegistry:
         os.makedirs(self.root, exist_ok=True)
         self._index_path = os.path.join(self.root, "_index.json")
         self._index: dict[str, str] = self._load_index()
+        self._notes_path = os.path.join(self.root, NOTES_FILE)
+        self._notes: dict[str, str] = self._load_notes()
 
     # ------------------------------------------------------------ 账号索引
 
@@ -94,15 +139,7 @@ class BotRegistry:
 
     def _save_index(self) -> None:
         try:
-            import json
-            import tempfile
-
-            fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as fp:
-                json.dump(self._index, fp, ensure_ascii=False, sort_keys=True)
-            # 先写临时文件再 rename：直接覆盖时若进程被 kill，
-            # 会留下半个 JSON，下次启动整张索引读不出来。
-            os.replace(tmp, self._index_path)
+            _atomic_json(self._index_path, self._index)
         except Exception:
             pass
 
@@ -110,6 +147,63 @@ class BotRegistry:
         """已知的全部账号（不打开任何连接）。"""
         with self._lock:
             return sorted(set(self._index.values()))
+
+    # ------------------------------------------------------------ 备注
+
+    def _load_notes(self) -> dict[str, str]:
+        """`platform_id -> 备注`。读失败当作没有备注，不影响任何读写路径。"""
+        try:
+            import json
+
+            with open(self._notes_path, encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict):
+                clean = {}
+                for k, v in data.items():
+                    note = normalize_note(v)
+                    if note:
+                        clean[str(k)] = note
+                return clean
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return {}
+
+    def _save_notes(self) -> None:
+        try:
+            _atomic_json(self._notes_path, self._notes)
+        except Exception:
+            pass
+
+    def note_of(self, platform_id: str) -> str:
+        with self._lock:
+            return self._notes.get(str(platform_id or UNKNOWN_BOT), "")
+
+    def notes(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._notes)
+
+    def set_note(self, platform_id: str, text: object) -> str:
+        """设置或清除备注，返回落盘后的值（空串＝已清除）。
+
+        对**没登记过的账号**也允许写：备注是给人看的，先起名再等账号说话
+        是正常操作顺序；但 `accounts()` 只按库文件列行，所以这类备注在库
+        文件出现之前不会显示，不会凭空多出一个假账号。
+        """
+        pid = str(platform_id or UNKNOWN_BOT).strip() or UNKNOWN_BOT
+        note = normalize_note(text)
+        with self._lock:
+            if note:
+                if self._notes.get(pid) == note:
+                    return note
+                self._notes[pid] = note
+            else:
+                if pid not in self._notes:
+                    return ""
+                self._notes.pop(pid, None)
+            self._save_notes()
+        return note
 
     # ------------------------------------------------------------ 账号盘点
 
@@ -135,6 +229,7 @@ class BotRegistry:
         with self._lock:
             index = dict(self._index)
             opened = set(self._open)
+            notes = dict(self._notes)
         by_stem = {stem: pid for stem, pid in index.items()}
 
         try:
@@ -148,7 +243,9 @@ class BotRegistry:
             stem = name[:-3]
             seen.add(stem)
             pid = by_stem.get(stem)
-            out.append(self._row(pid, stem, name, opened))
+            row = self._row(pid, stem, name, opened)
+            row["note"] = notes.get(row["platform_id"], "") if pid else ""
+            out.append(row)
         for stem, pid in by_stem.items():
             if stem in seen:
                 continue
@@ -156,6 +253,7 @@ class BotRegistry:
                 "platform_id": pid, "stem": stem, "file": "",
                 "size_bytes": 0, "wal_bytes": 0, "last_write_at": 0.0,
                 "opened": pid in opened, "orphan": False, "missing": True,
+                "note": notes.get(pid, ""),
             })
 
         # 按最后写入倒序：运维最关心「哪个账号最近不动了」，排前面才有用。
@@ -188,6 +286,8 @@ class BotRegistry:
             "wal_bytes": wal,
             "last_write_at": last,
             "opened": bool(pid) and pid in opened,
+            # 备注由调用方按 platform_id 补齐（这里拿不到 notes 快照）。
+            "note": "",
             # 索引里查不到 platform_id：文件名是 slug+hash，不可逆，
             # 所以只能如实告诉界面「这个库不知道属于谁」。
             "orphan": not pid,
@@ -273,6 +373,10 @@ class BotRegistry:
         with self._lock:
             if self._index.pop(bot_file_stem(bot), None) is not None:
                 self._save_index()
+            # 备注跟着账号一起清：留着会让下次同 id 重建的账号继承一个
+            # 早已不属于它的名字，比没有备注更容易误导人。
+            if self._notes.pop(bot, None) is not None:
+                self._save_notes()
         path = self.db_path(bot)
         removed = False
         for suffix in ("", "-wal", "-shm"):

@@ -54,7 +54,35 @@ def _bootstrap_paths() -> list[str]:
     return added
 
 
+def _purge_stale_packages() -> list[str]:
+    """把上一次加载残留的 `hermes_*` 模块从 `sys.modules` 里摘掉。
+
+    **为什么必须自己动手**：AstrBot 的「重载插件」只清理 `data.plugins.<插件名>`
+    前缀的模块。而本插件的辅助包是通过 sys.path 以**顶层名**（`hermes_fleet`、
+    `hermes_storage_sqlite`…）导入的，不匹配那个前缀，于是重载后：
+
+        main.py 是新的，packages/ 下的辅助包还是旧的。
+
+    症状极其隐蔽：新加的接口在第一次调用时 `AttributeError`，而代码看起来
+    完全正确，只在「热更新过、没重启」的机器上复现。v0.7 给 `BotRegistry`
+    加 `set_note` 时就踩了一次（备注接口 500，其它接口都正常）。
+
+    只摘**文件位于本插件目录内**的模块：万一将来与别的插件同名，也不会
+    把人家的模块从缓存里删掉——那会让对方拿到两份互不相同的类。
+    """
+    purged: list[str] = []
+    for name, mod in list(sys.modules.items()):
+        if not name.split(".", 1)[0].startswith("hermes_"):
+            continue
+        path = str(getattr(mod, "__file__", "") or "")
+        if path.startswith(_HERE):
+            del sys.modules[name]
+            purged.append(name)
+    return purged
+
+
 _bootstrap_paths()
+_purge_stale_packages()
 
 from astrbot.api import logger  # noqa: E402
 from astrbot.api.event import filter, AstrMessageEvent  # noqa: E402
@@ -94,7 +122,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.7.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -126,7 +154,7 @@ class AstrBotProvider:
 
     @property
     def name(self) -> str:
-        return self.provider_id or "<当前对话模型>"
+        return self.provider_id or "当前对话模型"
 
     def _instance(self):
         ctx = getattr(self._plugin, "context", None)
@@ -238,12 +266,7 @@ class HermesFleet(Star):
             recall_k=int(self._get_cfg("recall_k", 5)),
         )
         self._inject_guard: dict[str, float] = {}
-        self.provider = FallbackProvider(
-            self._provider_chain(),
-            retry_times=int(self._get_cfg("llm_retry_times", 1)),
-            retry_base_s=float(self._get_cfg("llm_retry_base_seconds", 0.8)),
-            cooldown_s=float(self._get_cfg("llm_cooldown_seconds", 180)),
-        )
+        self.provider = self._new_fallback()
         self.summarizer = SessionSummarizer(
             self.provider,
             min_messages=int(self._get_cfg("summarize_min_messages", 8)),
@@ -274,34 +297,107 @@ class HermesFleet(Star):
         """按配置拼出降级链：主模型 → 降级 1 → 降级 2 …
 
         `llm_provider_ids` 是逗号/换行分隔的 provider id 列表，顺序即优先级；
-        留空时退回老的 `llm_provider_id`（单值），再留空就跟随 AstrBot 当前
-        对话模型。
+        `__current__` 表示「跟随主应用当前对话模型」。解析细节见
+        `hermes_fleet.chain`——那里能在没有 AstrBot 的机器上被单测覆盖。
 
-        为什么允许留空跟随当前模型：小规模部署（一两个 bot）没必要指定，
-        跟随主体最省事。但**跑上百个账号时应当显式配链**——上百个 bot 的
-        后台总结同时抽风，靠人工发现是来不及的。
+        为什么**推荐显式配链**：留空时这条链会跟着主应用的默认模型走，
+        于是主应用换一次模型，长期记忆的归纳风格就静默漂移一次，事后
+        无法归因。上百个账号同时受影响的场景下，这属于「无声改行为」。
         """
-        raw = str(self._get_cfg("llm_provider_ids", "") or "")
-        ids = [x.strip() for x in raw.replace("\n", ",").replace("，", ",").split(",")
-               if x.strip()]
-        if not ids:
-            single = str(self._get_cfg("llm_provider_id", "") or "").strip()
-            if single:
-                ids = [single]
-        if not ids:
-            ids = [""]
+        from hermes_fleet.chain import CURRENT, chain_from_config
 
+        ids = chain_from_config(
+            self._get_cfg("llm_provider_ids", ""),
+            self._get_cfg("llm_provider_id", ""),
+        )
         chain: list[tuple[str, AstrBotProvider]] = []
-        seen: set[str] = set()
         for pid in ids:
-            key = pid or "\x00current"
-            if key in seen:
-                # 同一个 provider 配两遍：降级到它没有意义，还会让冷却表互相污染。
-                continue
-            seen.add(key)
-            inst = AstrBotProvider(self, pid)
+            inst = AstrBotProvider(self, "" if pid == CURRENT else pid)
             chain.append((inst.name, inst))
         return chain
+
+    def _new_fallback(self) -> FallbackProvider:
+        """按当前配置造一条新的降级链实例（初始化与热切换共用）。"""
+        return FallbackProvider(
+            self._provider_chain(),
+            retry_times=int(self._get_cfg("llm_retry_times", 1)),
+            retry_base_s=float(self._get_cfg("llm_retry_base_seconds", 0.8)),
+            cooldown_s=float(self._get_cfg("llm_cooldown_seconds", 180)),
+        )
+
+    def rebuild_provider(self) -> None:
+        """按当前配置重建降级链，并把它接到后台任务上。
+
+        为什么要能在运行时换：改完模型链最适合立刻验证（发一条消息、看
+        日志）。如果必须重载插件才生效，人就会「先保存着，回头再说」，
+        而这类配置忘了重启的代价是整晚的后台总结全部落空。
+
+        # 冷却表随旧实例丢弃：那是「上一套链的故障历史」，
+        # 继续沿用会让新选的主模型一上来就背着前一个模型的冷却。
+        """
+        new = self._new_fallback()
+        self.provider = new
+        # 后台任务持有的是构造时传进来的 llm 引用，必须一起换掉，
+        # 否则「保存了但总结还在用旧模型」——这类不一致只能靠人翻代码发现。
+        for worker in (getattr(self, "summarizer", None),
+                       getattr(self, "consolidator", None)):
+            if worker is not None:
+                worker.llm = new
+
+    def chain_config(self) -> dict:
+        """当前模型链的「意图」与「来源」，供管理台渲染与判断是否告警。"""
+        from hermes_fleet.chain import CURRENT, describe, label, parse, source_of
+
+        raw_chain = self._get_cfg("llm_provider_ids", "")
+        raw_single = self._get_cfg("llm_provider_id", "")
+        source = source_of(raw_chain, raw_single)
+        desc = describe(parse(raw_chain) or parse(raw_single) or [CURRENT])
+        desc["source"] = source
+        desc["stored"] = str(raw_chain or "")
+        desc["primary_label"] = label(desc["primary"])
+        return desc
+
+    def providers_catalog(self) -> tuple[list[dict], str]:
+        """主应用里已经配置好的对话模型清单 + 当前默认模型 id。
+
+        **只读主应用，不改它**：记忆系统要用哪个模型，由本插件的配置决定。
+        这里只是把候选摆在页面上让人挑，所以拿不到（AstrBot 还没启动完、
+        或版本差异导致 API 不同）时返回空表，让页面显示「无法读取」，
+        而不是猜一个列表出来。
+        """
+        ctx = getattr(self, "context", None)
+        rows: list[dict] = []
+        seen: set[str] = set()
+        try:
+            insts = list(ctx.get_all_providers() or [])
+        except Exception:
+            insts = []
+        for inst in insts:
+            try:
+                meta = inst.meta()
+            except Exception:
+                continue
+            pid = str(getattr(meta, "id", "") or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            rows.append({
+                "id": pid,
+                "model": str(getattr(meta, "model", "") or ""),
+                "type": str(getattr(meta, "type", "") or ""),
+                "kind": str(getattr(getattr(meta, "provider_type", ""), "value", "")
+                            or getattr(meta, "provider_type", "") or ""),
+            })
+        current = ""
+        try:
+            cur = ctx.get_using_provider()
+            if cur is not None:
+                current = str(getattr(cur.meta(), "id", "") or "")
+        except Exception:
+            current = ""
+        for row in rows:
+            row["current"] = bool(current and row["id"] == current)
+        return rows, current
 
     @staticmethod
     def _platform_id(event: AstrMessageEvent) -> str:
@@ -499,12 +595,20 @@ class HermesFleet(Star):
         scene = await self.svc.scene(**self._scene_args(event))
         mine = await self.svc.bot_stats(pid)
         scope = f"群 {scene.group_id}" if scene.is_group else "私聊"
+        note = self.registry.note_of(pid)
+        try:
+            from hermes_fleet.chain import SOURCE_LABELS
+
+            source = SOURCE_LABELS.get(self.chain_config().get("source"), "")
+        except Exception:
+            source = ""
         yield event.plain_result(
-            f"【本账号】{pid}\n"
+            f"【本账号】{note + '（' + pid + '）' if note else pid}\n"
             f"当前场景：{scope}\n"
             f"归档记忆 {mine['memories']} 条，常驻词条 {mine['resident']} 条，"
             f"消息 {mine['messages']} 条（未总结 {mine['unsummarized']}）\n"
-            f"【模型链】{self.provider.summary()}\n"
+            f"【模型链】{self.provider.summary()}"
+            + (f"（{source}）" if source else "") + "\n"
             f"【全局】库目录 {st['root']}，已打开 {st['opened']}/{st['max_open']}，"
             f"磁盘上 {len(st['files_on_disk'])} 个账号库"
         )
