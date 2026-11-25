@@ -81,7 +81,25 @@ core 围绕它的四件配套一件都没搬——结果就是用户说「以后
    写进 address。主语写进标签，这件事才不靠猜。
 
 代码在 `packages/fleet/src/hermes_fleet/resident.py`（纯逻辑，无 IO），
-34 条用例在 `packages/fleet/tests/test_resident_dialog.py`。
+40 条用例在 `packages/fleet/tests/test_resident_dialog.py`。
+
+### 2.2 注入位置：core 是「用户提示词」，fleet 多给一个开关
+
+core 的 `_inject` 优先把块做成临时 `TextPart` 塞进
+`req.extra_user_content_parts`（`mark_as_temp()`，不进会话历史），
+只有老版本没有这个字段时才退回 `req.system_prompt`。fleet 沿用同一策略，
+**默认行为与 core 完全一致**。
+
+差别在 fleet 加了 `inject_to_system_prompt`：打开后拼到 `system_prompt`
+末尾。为什么值得多一个开关——core 里「规则与避雷」躺在用户消息里，模型
+只当资料看；真正需要「硬约束」的场合（客服不能说错价格）它不够用。
+代价也要说清：系统提示词里常驻与人格同级，而常驻正文可能来自历史对话
+（群友写过），指令腔更容易被当真；且系统提示词改动会让该段之后的缓存失效。
+
+实现上 core 是内联 if/else，fleet 抽出 `append_system_prompt()` 纯函数 +
+`_place_block()` 单一入口，理由是**幂等**：一次发言可能走多轮工具循环，
+钩子被叫多次，内联写法会让系统提示词一轮一轮变长。core 那条路径不受
+影响（临时 part 每次是新对象、不进历史），所以它不需要这层保护。
 
 **仍未做**：core 的 `/hermes 归位`（把归档记忆一次性合并进六词条，人工触发）。
 fleet 现在只有 WebUI 上的手动编辑，缺这条"批量归位"入口。

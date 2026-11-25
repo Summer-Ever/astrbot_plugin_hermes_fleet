@@ -325,6 +325,28 @@ def render_inject(blocks: dict[ResidentBlock, str], *, is_group: bool,
     return "\n".join(head + body + tail)
 
 
+def append_system_prompt(system_prompt: str, block: str) -> str:
+    """把注入块拼到系统提示词末尾。返回新字符串，不改入参。
+
+    两个细节都是踩过的：
+
+    1. **幂等**。一次用户发言可能走多轮 LLM 请求（工具调用循环），
+       `on_llm_request` 每轮都会被叫一次；同一个 `ProviderRequest` 若被
+       重复拼接，系统提示词会一轮一轮变长。判断依据用块首的 `INJECT_OPEN`
+       标记，而不是靠调用方记状态——调用方可能是别的插件、别的版本。
+    2. **只追加在尾部**。系统提示词的主体是人格设定，插到中间会把
+       「你是 XX」和后面的指令隔开；尾部追加也让前缀缓存尽可能保住
+       ——变动的永远是最后一段。
+    """
+    text = str(block or "")
+    if not text:
+        return str(system_prompt or "")
+    base = str(system_prompt or "").rstrip()
+    if INJECT_OPEN in base:
+        return base
+    return f"{base}\n\n{text}" if base else text
+
+
 __all__ = [
     "BLOCK_ALIASES",
     "BLOCK_LABELS",
@@ -337,6 +359,7 @@ __all__ = [
     "MAINT_NOTES",
     "MAX_INJECT_CHARS",
     "STATE_CHANGE_WORDS",
+    "append_system_prompt",
     "clean_text",
     "direction_advice",
     "is_injection",

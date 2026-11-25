@@ -16,8 +16,8 @@ from typing import Any
 # 分组只决定「设置页怎么排」，不影响 schema。没列入的键会落到「其他」，
 # 这样以后加配置项忘了归类也只是排到末尾，而不是在页面上消失。
 GROUPS: list[tuple[str, list[str]]] = [
-    ("记忆注入", ["memory_injection", "capture_messages", "recall_k",
-                  "group_private_memory"]),
+    ("记忆注入", ["memory_injection", "inject_to_system_prompt", "capture_messages",
+                  "recall_k", "group_private_memory"]),
     ("存储与容量", ["bot_db_dir", "max_open_bots", "account_stale_days"]),
     ("后台总结", ["summarize_enabled", "summarize_interval_minutes",
                   "summarize_min_messages", "summarize_idle_hours",
@@ -89,6 +89,20 @@ def _as_bool(raw: Any) -> bool:
     if text in ("false", "0", "no", "off", ""):
         return False
     raise ValueError("需要布尔值")
+
+
+def as_flag(raw: Any, default: bool = False) -> bool:
+    """把配置值读成 bool，读不懂就用默认值。
+
+    存在的理由很具体：AstrBot 的配置来自 JSON，但手改配置文件、旧版面板、
+    从别处拷来的 `cmd_config.json` 都可能留下字符串 `"false"`，而
+    `bool("false")` 是 True——配置页上明明关掉了，行为却还开着，且不会报错。
+    插件里所有开关都必须走这里，不能用 `bool(...)` 包一层。
+    """
+    try:
+        return _as_bool(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def _as_number(raw: Any, meta: dict, *, integer: bool) -> float | int:

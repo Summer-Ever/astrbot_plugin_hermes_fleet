@@ -36,6 +36,7 @@ from hermes_fleet.resident import (  # noqa: E402
     GROUP_NOTE,
     INJECT_CLOSE,
     INJECT_OPEN,
+    append_system_prompt,
     clean_text,
     direction_advice,
     is_injection,
@@ -162,6 +163,42 @@ class RenderTest(unittest.TestCase):
                              is_group=False, max_chars=200)
         self.assertTrue(text.endswith(INJECT_CLOSE))
         self.assertNotIn("用户信息", text)
+
+
+class SystemPromptPlacementTest(unittest.TestCase):
+    """系统的另一半：把块拼到 system_prompt 尾部的那条路径。
+
+    默认走用户提示词，但开关一旦打开就落到这里，所以两条路径的行为都要钉住。
+    """
+
+    def test_拼在尾部且与原文隔一个空行(self) -> None:
+        out = append_system_prompt("你是小雅。", "- 怎么称呼用户：阿明")
+        self.assertTrue(out.startswith("你是小雅。"))
+        self.assertTrue(out.endswith("- 怎么称呼用户：阿明"))
+        self.assertIn("你是小雅。\n\n", out)
+
+    def test_系统提示词为空时不留前导空行(self) -> None:
+        self.assertEqual(append_system_prompt("", "BLOCK"), "BLOCK")
+        self.assertEqual(append_system_prompt(None, "BLOCK"), "BLOCK")
+
+    def test_尾随空白先被收掉(self) -> None:
+        """人设末尾常有换行，直接拼会多出三四个空行。"""
+        self.assertEqual(append_system_prompt("人设。\n\n  ", "B"), "人设。\n\nB")
+
+    def test_重复调用不会越拼越长(self) -> None:
+        """一次发言可能走多轮工具循环，钩子会被叫多次。"""
+        once = append_system_prompt("人设。", INJECT_OPEN + "\nX")
+        twice = append_system_prompt(once, INJECT_OPEN + "\nX")
+        self.assertEqual(once, twice)
+        self.assertEqual(twice.count(INJECT_OPEN), 1)
+
+    def test_空块不动原文(self) -> None:
+        self.assertEqual(append_system_prompt("人设。", ""), "人设。")
+
+    def test_不修改入参(self) -> None:
+        base = "人设。"
+        append_system_prompt(base, "B")
+        self.assertEqual(base, "人设。")
 
 
 class _Base(unittest.IsolatedAsyncioTestCase):

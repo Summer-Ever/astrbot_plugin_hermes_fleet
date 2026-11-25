@@ -15,7 +15,7 @@ from .registry import (
     normalize_note,
 )
 from .service import BLOCK_LABELS, INJECT_HEADER, MAINT_NOTES, MemoryService, Scene
-from .resident import INJECT_LABELS, direction_advice
+from .resident import INJECT_LABELS, append_system_prompt, direction_advice
 
 __all__ = [
     "admin",
@@ -34,5 +34,6 @@ __all__ = [
     "INJECT_HEADER",
     "INJECT_LABELS",
     "MAINT_NOTES",
+    "append_system_prompt",
     "direction_advice",
 ]

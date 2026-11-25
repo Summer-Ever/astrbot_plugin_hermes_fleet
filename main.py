@@ -123,8 +123,10 @@ from hermes_fleet import (  # noqa: E402
     BotRegistry,
     INJECT_LABELS,
     MemoryService,
+    append_system_prompt,
     direction_advice,
 )
+from hermes_fleet.settings import as_flag  # noqa: E402
 from hermes_workers import (  # noqa: E402
     ConsolidateOutcome,
     FallbackProvider,
@@ -133,7 +135,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.7.2"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -273,7 +275,9 @@ class HermesFleet(Star):
         )
         self.svc = MemoryService(
             self.registry,
-            group_private_memory=bool(self._get_cfg("group_private_memory", False)),
+            group_private_memory=as_flag(
+                self._get_cfg("group_private_memory", False), False
+            ),
             recall_k=int(self._get_cfg("recall_k", 5)),
         )
         self._inject_guard: dict[str, float] = {}
@@ -451,7 +455,7 @@ class HermesFleet(Star):
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
-            if not self._get_cfg("memory_injection", True):
+            if not as_flag(self._get_cfg("memory_injection", True), True):
                 return
             query = (event.message_str or "").strip()
             if not query:
@@ -475,23 +479,48 @@ class HermesFleet(Star):
                     k: v for k, v in self._inject_guard.items() if v > cutoff
                 }
 
-            if TextPart is not None and hasattr(req, "extra_user_content_parts"):
-                part = TextPart(text=block)
-                if hasattr(part, "mark_as_temp"):
-                    part.mark_as_temp()
-                req.extra_user_content_parts.append(part)
-            else:  # pragma: no cover - 仅老版本
-                req.system_prompt = (req.system_prompt or "") + "\n" + block
+            self._place_block(req, block)
         except Exception:
             # 注入失败绝不能让整轮对话失败：这里只记录，正常继续。
             logger.error(f"[hermes_fleet] 注入失败:\n{traceback.format_exc(limit=6)}")
+
+    def _place_block(self, req: ProviderRequest, block: str) -> None:
+        """把注入块放到本轮请求里。位置由 `inject_to_system_prompt` 决定。
+
+        两种位置的差别不是风格问题：
+
+        - **用户提示词**（默认）：作为临时 content part 拼进本轮用户消息，
+          不进会话历史。模型把它当「用户给我的资料」，与系统人格设定的
+          优先级隔开一层——词条正文来自历史对话，可能被群友写过，这一层
+          隔离是白拿的。代价是「规则与避雷」这类内容也只是资料，不是命令。
+        - **系统提示词尾部**：权威性上来了，模型更倾向把它当硬约束遵守；
+          代价是它和人格设定同级，词条里的指令腔更容易被当真，而且部分
+          服务商的系统提示词缓存会按「整段指纹」命中，改一个词就整段失效。
+
+        默认取前者，因为常驻的本职是「提供事实」而不是「下达命令」，
+        强约束需求（不许骂人、必须报价格）本来就该写在人设里。
+        """
+        prefer_system = as_flag(self._get_cfg("inject_to_system_prompt", False), False)
+        if prefer_system and hasattr(req, "system_prompt"):
+            req.system_prompt = append_system_prompt(req.system_prompt or "", block)
+            return
+        if TextPart is not None and hasattr(req, "extra_user_content_parts"):
+            part = TextPart(text=block)
+            if hasattr(part, "mark_as_temp"):
+                part.mark_as_temp()
+            req.extra_user_content_parts.append(part)
+            return
+        # 老版本既没有临时 part、也没有可写的 system_prompt 时才走到这里；
+        # 后者其实基本不存在（ProviderRequest 一直有这个字段），留作兜底。
+        if hasattr(req, "system_prompt"):  # pragma: no cover
+            req.system_prompt = append_system_prompt(req.system_prompt or "", block)
 
     # ------------------------------------------------------------ 落库
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         try:
-            if not self._get_cfg("capture_messages", True):
+            if not as_flag(self._get_cfg("capture_messages", True), True):
                 return
             user_text = (event.message_str or "").strip()
             reply = str(getattr(resp, "completion_text", "") or "").strip()
@@ -759,7 +788,7 @@ class HermesFleet(Star):
         为什么单账号失败要吞掉：一个账号的库文件损坏（磁盘满、被外部删了）
         不该让其余 99 个账号永远停止总结。
         """
-        if not bool(self._get_cfg("summarize_enabled", True)):
+        if not as_flag(self._get_cfg("summarize_enabled", True), True):
             return "自动总结已关闭（配置里打开 summarize_enabled 后生效）"
 
         bots = self.registry.known_bots()
@@ -775,7 +804,7 @@ class HermesFleet(Star):
         cons = ConsolidateOutcome()
         # 整理只跑在「刚产生新记忆」的账号上：新条目才是重复的来源，
         # 没写新记忆的库每轮都扫一遍纯属空转。
-        consolidate_on = bool(self._get_cfg("consolidate_enabled", True))
+        consolidate_on = as_flag(self._get_cfg("consolidate_enabled", True), True)
         for pid in picked:
             try:
                 db = self.registry.get(pid)
@@ -854,7 +883,7 @@ class HermesFleet(Star):
             f"最多同时打开 {st['max_open']} 个"
         )
         self._register_web_apis()
-        if bool(self._get_cfg("summarize_enabled", True)):
+        if as_flag(self._get_cfg("summarize_enabled", True), True):
             self._bg_task = asyncio.create_task(self._bg_loop())
             logger.info("[hermes_fleet] 自动总结已启动")
 
