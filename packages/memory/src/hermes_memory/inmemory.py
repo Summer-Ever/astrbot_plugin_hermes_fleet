@@ -233,6 +233,28 @@ class InMemoryMemoryStore:
             n += 1
         return n
 
+    async def list_scopes(
+        self,
+        bot_id: BotId,
+        *,
+        min_active: int = 1,
+    ) -> Sequence[tuple[MemoryKey, int]]:
+        with self._lock:
+            rows = [m for m in self._rows.values()
+                    if m.is_active and m.bot_id == bot_id]
+        counts: dict[tuple, list] = {}
+        for m in rows:
+            k = (str(m.scope), m.owner_id, m.group_id)
+            if k not in counts:
+                counts[k] = [MemoryKey(
+                    bot_id=bot_id, scope=m.scope,
+                    owner_id=m.owner_id, group_id=m.group_id,
+                ), 0]
+            counts[k][1] += 1
+        out = [(k, n) for k, n in counts.values() if n >= min_active]
+        out.sort(key=lambda kv: (-kv[1], str(kv[0].scope), kv[0].owner_id, kv[0].group_id))
+        return tuple(out)
+
     async def purge_owner(self, bot_id: BotId, owner_id: OwnerId) -> int:
         """物理删除。合规删除要求真删，不是软删除。"""
         with self._lock:

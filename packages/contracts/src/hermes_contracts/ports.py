@@ -151,6 +151,24 @@ class MemoryStore(Protocol):
         """计数。整理任务的触发阈值靠它判断，不要用「查出来再 len()」。"""
         ...
 
+    async def list_scopes(
+        self,
+        bot_id: BotId,
+        *,
+        min_active: int = 1,
+    ) -> Sequence[tuple[MemoryKey, int]]:
+        """列出该账号下「有活跃记忆」的全部作用域及条数，按条数降序。
+
+        为什么必须有这个方法：整理任务的入口是「哪些作用域值得整理」。没有它，
+        调用方只能自己维护一份 owner/group 清单——重启即丢，于是「昨天攒的记忆
+        永远等不到整理」；或者退化成按已知 owner 逐个查，那样但凡没被这次会话
+        碰到的作用域就永远不会被整理。两种退化都不会报错。
+
+        `min_active` 在存储层过滤，避免把上千个只有两三条记忆的作用域
+        搬进 Python 再筛。
+        """
+        ...
+
     async def purge_owner(self, bot_id: BotId, owner_id: OwnerId) -> int:
         """物理删除某人的全部记忆，返回删除条数。
 

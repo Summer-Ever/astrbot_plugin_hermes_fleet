@@ -209,6 +209,53 @@ class MemoryStoreConformance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.count_active(BOT, owner_id=BOB), 1)
         self.assertEqual(await self.store.count_active(BOT), 2)
 
+    async def test_list_scopes_groups_by_owner_and_group(self) -> None:
+        """整理任务的入口：必须能自己数出「哪些作用域值得整理」。
+
+        少了这个方法，调用方只能靠「本次启动后碰过的会话」来枚举作用域，
+        重启后昨天攒的记忆就永远等不到整理——而且不会报错。
+        """
+        for i in range(3):
+            await self.store.add(memory(self.clock, content=f"alice 私聊 {i}", owner=ALICE))
+        await self.store.add(memory(self.clock, content="bob 私聊", owner=BOB))
+        for i in range(2):
+            await self.store.add(memory(
+                self.clock, content=f"群里第 {i} 条", owner="",
+                scope=MemoryScope.GROUP, visibility=Visibility.GROUP, group_id=GROUP,
+            ))
+        # 另一个 bot 的库不能被数进来
+        await self.store.add(memory(self.clock, content="beta 的记忆", bot=BOT_B))
+
+        scopes = await self.store.list_scopes(BOT)
+        got = {(str(k.scope), k.owner_id, k.group_id): n for k, n in scopes}
+        self.assertEqual(got.get(("user", str(ALICE), "")), 3)
+        self.assertEqual(got.get(("user", str(BOB), "")), 1)
+        self.assertEqual(got.get(("group", "", GROUP)), 2)
+        self.assertFalse(
+            any(k.owner_id == str(ALICE) and n == 4 for k, n in scopes),
+            "跨 bot 的同一 owner 不能合并计数",
+        )
+        self.assertEqual(
+            [n for _, n in scopes], sorted((n for _, n in scopes), reverse=True),
+            "按条数降序返回，调用方才能先处理最该整理的",
+        )
+
+    async def test_list_scopes_honours_min_active(self) -> None:
+        await self.store.add(memory(self.clock, content="bob 第1条", owner=BOB))
+        await self.store.add(memory(self.clock, content="bob 第2条", owner=BOB))
+        await self.store.add(memory(self.clock, content="alice 第1条", owner=ALICE))
+
+        few = await self.store.list_scopes(BOT, min_active=2)
+        self.assertEqual([n for _, n in few], [2], "低于阈值的应被存储层过滤掉")
+        self.assertEqual(str(few[0][0].owner_id), str(BOB))
+
+    async def test_list_scopes_ignores_merged(self) -> None:
+        a = await self.store.add(memory(self.clock, content="保留"))
+        b = await self.store.add(memory(self.clock, content="会被并掉"))
+        await self.store.merge([b.id], a.id, at=self.clock.now())
+        scopes = await self.store.list_scopes(BOT)
+        self.assertEqual([n for _, n in scopes], [1], "已合并的不能算进活跃条数")
+
     async def test_list_active_cursor_has_no_duplicates(self) -> None:
         for i in range(6):
             await self.store.add(memory(self.clock, content=f"第{i}条"))

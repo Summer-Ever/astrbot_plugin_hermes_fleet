@@ -419,6 +419,35 @@ class SqliteMemoryStore:
             ).fetchone()
         return int(r[0]) if r else 0
 
+    async def list_scopes(self, bot_id: BotId, *, min_active: int = 1,
+                          ) -> Sequence[tuple[MemoryKey, int]]:
+        """按 (scope, owner, group) 分组计数。
+
+        在 SQL 里 `group by` 而不是把行捞出来在 Python 聚合：100 个账号下，
+        某个人的库可能有几千条记忆，把它们搬到 Python 只为数个数是纯浪费，
+        而且会把整轮整理的时间预算花在传输上。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "select scope, owner_id, group_id, count(*) from memories "
+                "where bot_id=? and merged_into=0 "
+                "group by scope, owner_id, group_id having count(*)>=? "
+                "order by count(*) desc",
+                (str(bot_id), max(1, int(min_active))),
+            ).fetchall()
+        out = []
+        for scope, owner_id, group_id, n in rows:
+            out.append((
+                MemoryKey(
+                    bot_id=bot_id,
+                    scope=MemoryScope(str(scope)),
+                    owner_id=str(owner_id or EMPTY),
+                    group_id=str(group_id or EMPTY),
+                ),
+                int(n),
+            ))
+        return out
+
     async def purge_owner(self, bot_id: BotId, owner_id: OwnerId) -> int:
         """物理删除某人的全部记忆，并清理指向已删行的合并死链。
 

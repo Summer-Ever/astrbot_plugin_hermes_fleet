@@ -64,5 +64,35 @@
     "default": 6,
     "description": "多久没动静也兜底总结（小时）",
     "hint": "只按条数触发时，说完最后一句就没人再说话的会话永远等不到总结，而那几句往往最需要记住。"
+  },
+  "summarize_sessions_per_bot": {
+    "type": "int",
+    "default": 4,
+    "description": "每个账号每轮最多总结几个会话",
+    "hint": "一次模型调用一个会话。调大能让积压更快消化，但一轮跑太久会让进度迟迟不落盘。"
+  },
+  "consolidate_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "自动合并重复记忆",
+    "hint": "同一个偏好会被不同会话反复总结成多条，检索时互相挤占名额。开启后由模型判断哪些是真正的重复；合并是软删除，可回滚。"
+  },
+  "consolidate_min_active": {
+    "type": "int",
+    "default": 30,
+    "description": "一个作用域有多少条记忆才开始整理",
+    "hint": "太低会让整理频繁打扰模型，而两三条之间的「重复」往往只是措辞不同。每个人私聊、每个群各自独立计数。"
+  },
+  "consolidate_scopes_per_bot": {
+    "type": "int",
+    "default": 2,
+    "description": "每个账号每轮最多整理几个作用域",
+    "hint": "一次整理是一次模型调用。100 个账号下建议保持 1～3，避免整理把 provider 配额吃掉。"
+  },
+  "consolidate_max_merges": {
+    "type": "int",
+    "default": 20,
+    "description": "单个作用域每轮最多合并几条",
+    "hint": "这是保险丝：模型偶尔会把整库判成重复。设小一点，宁可分几轮慢慢合，也不要一次并掉几十条。"
   }
 }

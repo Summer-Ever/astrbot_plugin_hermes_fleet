@@ -85,9 +85,14 @@ except ImportError:  # pragma: no cover
 
 from hermes_contracts import ChatMessage, LlmResult  # noqa: E402
 from hermes_fleet import BotRegistry, MemoryService  # noqa: E402
-from hermes_workers import SessionSummarizer, SummaryOutcome  # noqa: E402
+from hermes_workers import (  # noqa: E402
+    ConsolidateOutcome,
+    MemoryConsolidator,
+    SessionSummarizer,
+    SummaryOutcome,
+)
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -223,6 +228,12 @@ class HermesFleet(Star):
         )
         self._bg_task: asyncio.Task | None = None
         self._bot_cursor = 0
+        self.consolidator = MemoryConsolidator(
+            self.provider,
+            min_active=int(self._get_cfg("consolidate_min_active", 30)),
+            max_scopes=int(self._get_cfg("consolidate_scopes_per_bot", 2)),
+            max_merges=int(self._get_cfg("consolidate_max_merges", 20)),
+        )
 
     # ------------------------------------------------------------ 工具
 
@@ -464,6 +475,20 @@ class HermesFleet(Star):
             return
         yield event.plain_result(f"总结完成：{note}")
 
+    @fleet.command("整理")
+    async def fleet_consolidate(self, event: AstrMessageEvent):
+        """手动跑一轮整理：把重复记忆合并（管理员）。"""
+        if not self._is_admin(event):
+            yield event.plain_result("该命令需要管理员权限。")
+            return
+        yield event.plain_result("开始整理，完成后回报结果……")
+        try:
+            note = await self.consolidate_pass()
+        except Exception as exc:
+            yield event.plain_result(f"整理失败：{exc}")
+            return
+        yield event.plain_result(f"整理完成：{note}")
+
     @fleet.command("账号列表")
     async def fleet_bots(self, event: AstrMessageEvent):
         if not self._is_admin(event):
@@ -519,6 +544,10 @@ class HermesFleet(Star):
         self._bot_cursor = (start + len(picked)) % max(1, len(bots))
 
         total = SummaryOutcome()
+        cons = ConsolidateOutcome()
+        # 整理只跑在「刚产生新记忆」的账号上：新条目才是重复的来源，
+        # 没写新记忆的库每轮都扫一遍纯属空转。
+        consolidate_on = bool(self._get_cfg("consolidate_enabled", True))
         for pid in picked:
             try:
                 db = self.registry.get(pid)
@@ -532,6 +561,37 @@ class HermesFleet(Star):
                 logger.error(f"[hermes_fleet] 账号 {pid} 总结失败：{exc}")
                 continue
             total.add(outcome)
+            if consolidate_on and outcome.memories > 0:
+                try:
+                    cons.add(await self.consolidator.run_bot(
+                        self.svc.bot_of(pid), memories=db.memories))
+                except Exception as exc:
+                    logger.error(f"[hermes_fleet] 账号 {pid} 整理失败：{exc}")
+        note = str(total)
+        if cons.merged or cons.failures:
+            note += "；整理：" + str(cons)
+        return note
+
+    async def consolidate_pass(self, *, max_bots: int = 10) -> str:
+        """手动跑一轮整理（管理员）。用来验证整理逻辑，不必等后台。
+
+        与总结不同，整理不要求有新记忆：手动命令的用途正是「把现有重复清一遍」，
+        所以这里绕开「条数增长」的闸，但仍然受每轮合并上限约束。
+        """
+        bots = self.registry.known_bots()
+        if not bots:
+            return "还没有任何账号产生过数据"
+        total = ConsolidateOutcome()
+        for pid in bots[: max(1, max_bots)]:
+            try:
+                db = self.registry.get(pid)
+                # 重置该账号的节流状态，让手动命令立刻生效
+                total.add(await self.consolidator.run_bot(
+                    self.svc.bot_of(pid), memories=db.memories, force=True))
+            except Exception as exc:
+                logger.error(f"[hermes_fleet] 账号 {pid} 整理失败：{exc}")
+                total.failures += 1
+                total.last_error = str(exc)
         return str(total)
 
     async def _bg_loop(self):
