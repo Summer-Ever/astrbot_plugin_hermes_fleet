@@ -348,6 +348,27 @@ class SqliteMemoryStore:
             rows = self._conn.execute(sql, args).fetchall()
         return [_row_to_memory(r) for r in rows]
 
+    async def list_by_owner(self, bot_id: BotId, owner_id: str, *,
+                            limit: int) -> Sequence[Memory]:
+        """导出用：某人的全部活跃记忆，**跨场景**。
+
+        与 `list_active` 的差别是「不限定单一 key」——导出要的是这个人的
+        完整画像，不是某个场景的切片。仍然只取 `merged_into=0`。
+
+        owner 为空直接返回空表：导出文件会作为附件发到聊天里，一旦有人
+        传了空 owner，这条 SQL 就会把**全库所有人的记忆**打包发出去。
+        """
+        owner = str(owner_id or "")
+        if not owner:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                f"select {_COLS} from memories where bot_id=? and owner_id=?"
+                " and merged_into=0 order by ts asc, id asc limit ?",
+                (str(bot_id), owner, max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
     async def search_candidates(self, key: MemoryKey, *, query: str,
                                 viewer: OwnerId, viewer_group: str,
                                 limit: int) -> Sequence[Memory]:

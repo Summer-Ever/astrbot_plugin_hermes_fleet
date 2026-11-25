@@ -5,7 +5,7 @@
 所以「谁依赖谁」是可穷举的。
 """
 
-from . import admin, chain, resident, settings
+from . import admin, chain, export, resident, settings
 from .registry import (
     MAX_NOTE,
     BotRegistry,
@@ -20,6 +20,7 @@ from .resident import INJECT_LABELS, append_system_prompt, direction_advice
 __all__ = [
     "admin",
     "chain",
+    "export",
     "resident",
     "settings",
     "BotRegistry",

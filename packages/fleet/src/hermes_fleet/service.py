@@ -314,6 +314,59 @@ class MemoryService:
         db = self.registry.get(str(self.bot_of(platform_id)))
         return db.stats()
 
+    async def export_owner(self, *, platform_id: str, owner_id: str,
+                           max_messages: int = 3000,
+                           max_memories: int = 2000) -> dict:
+        """收集「某人 + 某机器人」的全部记忆数据，供导出文档渲染。
+
+        取数放在服务层而不是命令里，是因为这是唯一一条把原始对话写到
+        文件上的路径：过滤条件必须只有一处实现，将来改了才不会漏。
+
+        返回的是**已过滤**的数据——`messages` 里已经没有别人的发言，
+        调用方可以直接渲染，不必（也不应该）再做一遍隐私判断。
+        """
+        from .export import pair_replies
+
+        pid = str(platform_id or "")
+        owner = str(owner_id or "")
+        empty = {
+            "bot_id": pid, "owner_id": owner, "resident": [], "memories": [],
+            "messages": [], "memory_total": 0, "message_total": 0,
+        }
+        if not pid or not owner or not self.registry.has_account(pid):
+            return empty
+
+        db = self.registry.get(pid)
+        bot = self.bot_of(pid)
+        resident = await db.resident.list_by_owner(bot, owner)
+        memories = await db.memories.list_by_owner(
+            bot, owner, limit=max(1, int(max_memories))
+        )
+        total_mem = await db.memories.count_active(bot, owner_id=owner)
+        total_msg = await db.messages.count_transcript(bot, owner)
+        # 放大取数窗口：群会话里大量行属于别人，配对时要用它们判断
+        # 「这条机器人回复是回谁的」。窗口太紧会把本人的行也一起挤掉。
+        window = min(20_000, max(1, int(max_messages)) * 8)
+        raw = await db.messages.transcript(bot, owner, limit=window)
+        # 过滤必须在取到完整会话上下文之后做：SQL 里提前滤掉群友的
+        # 发言，会让跟在后面的机器人回复被误算成回复本人。
+        kept = pair_replies(raw, owner)[-max(1, int(max_messages)):]
+        # 取数窗口没吃满就说明拿到了全部相关会话行，这时可以直接数过滤后的
+        # 条数：SQL 侧的估算会把「回复群友的话」也算进去，凭空多报一条。
+        total = (
+            len(kept) if len(raw) < window
+            else max(int(total_msg), len(kept))
+        )
+        return {
+            "bot_id": pid,
+            "owner_id": owner,
+            "resident": resident,
+            "memories": memories,
+            "messages": kept,
+            "memory_total": max(int(total_mem), len(memories)),
+            "message_total": total,
+        }
+
     async def probe(self, platform_ids: list[str], *, limit: int = 20) -> list[dict]:
         """逐个打开指定账号取真实统计，**用完立刻关掉**。
 

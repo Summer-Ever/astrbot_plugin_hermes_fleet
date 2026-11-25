@@ -26,6 +26,7 @@ GROUPS: list[tuple[str, list[str]]] = [
                   "consolidate_scopes_per_bot", "consolidate_max_merges"]),
     ("模型链", ["llm_provider_id", "llm_provider_ids", "llm_retry_times",
                "llm_retry_base_seconds", "llm_cooldown_seconds"]),
+    ("记忆导出", ["export_enabled", "export_max_messages", "export_keep_days"]),
 ]
 
 # 这些值在 `__init__` 里被读一次就固化了（registry 上限、worker 阈值、

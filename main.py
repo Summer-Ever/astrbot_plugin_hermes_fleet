@@ -28,6 +28,7 @@ import os
 import sys
 import time
 import traceback
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG_ROOT = os.path.join(_HERE, "packages")
@@ -135,7 +136,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.7.3"
+PLUGIN_VERSION = "0.8.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -722,6 +723,150 @@ class HermesFleet(Star):
             "「别记着我不吃辣」，我会自己改这一套。"
         )
         yield event.plain_result("\n".join(lines))
+
+    # ------------------------------------------------------------ 记忆导出
+
+    @staticmethod
+    def _command_args(event: AstrMessageEvent, *names: str) -> list[str]:
+        """取命令参数，兼容不同版本 `message_str` 是否含命令词。
+
+        现有命令用 `parts[1]` 定位参数，Implicitly 假定 message_str 的形态；
+        一个新入口不该把这种假设再复制一份，所以这里按名字把开头那几个
+        命令词吃掉，剩什么就是参数。
+        """
+        text = str(getattr(event, "message_str", "") or "")
+        tokens = [t.strip().lstrip("/") for t in text.split() if t.strip()]
+        known = set(names) | {"fleet"}
+        while tokens and tokens[0] in known:
+            tokens.pop(0)
+        return tokens
+
+    def _export_dir(self) -> str:
+        """导出文件放在插件自己的数据目录，不碰用户目录。"""
+        out = os.path.join(_default_data_dir(), "exports")
+        os.makedirs(out, exist_ok=True)
+        return out
+
+    @staticmethod
+    def _file_component(path: str):
+        """构造 File 组件。返回 None 表示当前宿主版本不支持文件组件。
+
+        必须同时给 `url`：OneBot 侧只带裸路径会报「识别 URL 失败」
+        （retcode 1200），`file:///` 形式才是协议端认的。老版本 File 没有
+        url 参数，所以逐级降级，而不是一上来就 TypeError 打断命令。
+        """
+        try:
+            from astrbot.api.message_components import File
+        except ImportError:
+            return None
+        name = os.path.basename(path)
+        uri = Path(path).resolve().as_uri()
+        for kwargs in (
+            {"file": path, "name": name, "url": uri},
+            {"file": uri, "name": name},
+            {"file": path, "name": name},
+        ):
+            try:
+                return File(**kwargs)
+            except TypeError:
+                continue
+        return None
+
+    async def _export_flow(self, event: AstrMessageEvent):
+        """「提取记忆」的完整流程。两个命令入口共用，避免行为分叉。"""
+        if not as_flag(self._get_cfg("export_enabled", True), True):
+            yield event.plain_result("记忆导出已在插件设置里关闭。")
+            return
+
+        scene = await self.svc.scene(**self._scene_args(event))
+        args = self._command_args(event, "提取记忆")
+        target = args[0] if args else str(scene.owner_id)
+        # 默认只导自己的。带参数就是「指定别人」，那一道闸必须是管理员，
+        # 否则群友打一句命令就能拿走另一个人的全部私聊原文。
+        if target and target != str(scene.owner_id) and not self._is_admin(event):
+            yield event.plain_result(
+                "只能导出自己的记忆。指定他人需要管理员权限。"
+            )
+            return
+
+        pid = self._platform_id(event)
+        try:
+            max_messages = int(self._get_cfg("export_max_messages", 3000))
+        except (TypeError, ValueError):
+            max_messages = 3000
+        data = await self.svc.export_owner(
+            platform_id=pid, owner_id=target, max_messages=max_messages
+        )
+        if not (data["resident"] or data["memories"] or data["messages"]):
+            who = "你" if target == str(scene.owner_id) else target
+            yield event.plain_result(f"这个机器人账号下还没有{who}的记忆数据。")
+            return
+
+        from hermes_fleet.export import (
+            export_filename, render_document, stale_exports,
+        )
+
+        # bot_id / owner_id 由 data 提供，这里不能重复传——Python 会在
+        # 调用处直接 TypeError（源码契约测试钉住这一点）。
+        doc = render_document(
+            note=self.registry.note_of(pid),
+            version=PLUGIN_VERSION,
+            now=time.time(),
+            **data,
+        )
+        out_dir = self._export_dir()
+        try:
+            entries = [
+                (n, os.path.getmtime(os.path.join(out_dir, n)))
+                for n in os.listdir(out_dir) if n.lower().endswith(".md")
+            ]
+            keep_days = float(self._get_cfg("export_keep_days", 7) or 7)
+            for stale in stale_exports(entries, now=time.time(),
+                                       keep_days=keep_days):
+                try:
+                    os.remove(os.path.join(out_dir, stale))
+                except OSError:
+                    pass
+        except Exception:
+            logger.warning(f"[hermes_fleet] 清理旧导出失败:\n{traceback.format_exc(limit=3)}")
+
+        name = export_filename(pid, target)
+        path = os.path.join(out_dir, name)
+        seq = 1
+        while os.path.exists(path):  # 同一秒内连发两次
+            stem, ext = os.path.splitext(name)
+            path = os.path.join(out_dir, f"{stem}-{seq}{ext}")
+            seq += 1
+        # 显式 UTF-8：Windows 默认 cp936，含 emoji 的记忆写下去会在别的
+        # 机器上直接乱码，而导出文件是要发到聊天里给人看的。
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(doc)
+
+        yield event.plain_result(
+            f"已整理：常驻 {len(data['resident'])} 条，"
+            f"归档 {data['memory_total']} 条，"
+            f"聊天原文 {len(data['messages'])}/{data['message_total']} 条。"
+            "文档随后发送。"
+        )
+        component = self._file_component(path)
+        if component is None:
+            yield event.plain_result(
+                "当前环境不支持发送文件组件，文档已保存在：\n" + path
+            )
+            return
+        yield event.chain_result([component])
+
+    @filter.command("提取记忆")
+    async def export_memory(self, event: AstrMessageEvent):
+        """把「你 + 本机器人」的常驻记忆、归档记忆和聊天原文打包发给你。"""
+        async for result in self._export_flow(event):
+            yield result
+
+    @fleet.command("提取记忆")
+    async def fleet_export_memory(self, event: AstrMessageEvent):
+        """同 /提取记忆；可带用户标识导出他人（仅管理员）。"""
+        async for result in self._export_flow(event):
+            yield result
 
     @fleet.command("总结")
     async def fleet_summarize(self, event: AstrMessageEvent):

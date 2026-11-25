@@ -138,6 +138,36 @@ class SqliteResidentStore:
             )
         return out
 
+    async def list_by_owner(self, bot_id: BotId,
+                            owner_id: OwnerId) -> list[ResidentEntry]:
+        """导出用：此人在**所有场景**下的非空词条（私聊 + 各群）。
+
+        按 scope/block 排序，让导出的文档每次都长一个样；不认识的新 block
+        直接跳过——旧版本插件读新版本库时不能整段导出失败。
+        """
+        owner = str(owner_id or "")
+        if not owner:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "select scope, block, content, updated_ts from resident "
+                "where bot_id=? and owner_id=? and content<>'' "
+                "order by scope asc, block asc",
+                (str(bot_id), owner),
+            ).fetchall()
+        out: list[ResidentEntry] = []
+        for scope_key, block, content, ts in rows:
+            try:
+                scope = ResidentScope.parse(str(scope_key))
+                target = ResidentBlock(str(block))
+            except ValueError:
+                continue
+            out.append(ResidentEntry(
+                bot_id=bot_id, owner_id=owner_id, scope=scope, block=target,
+                text=str(content), updated_ts=float(ts or 0.0),
+            ))
+        return out
+
     async def upsert(self, entry: ResidentEntry) -> ResidentEntry:
         text = clip(entry.text, MAX_RESIDENT_BLOCK_CHARS)
         ts = entry.updated_ts or self._now()
@@ -246,6 +276,73 @@ class SqliteMessageStore:
                 sender_id=str(r[1] or ""),
                 group_id=str(r[2] or ""),
                 summarized=bool(r[6]),
+            )
+            for r in rows
+        ]
+
+    def _session_sql(self) -> str:
+        """「这个人说过话的会话」——只定会话范围，**不过滤行**。
+
+        群会话是全体成员共享 session_id 的。乍一看应该在 SQL 里直接
+        `owner_id=? or role='assistant'` 把别人挡掉，但那样会出事了：
+        群友的发言行没了，跟着它的机器人回复就成了「无主的回复」，
+        配对逻辑会把它算到本人头上，把回复别人的内容导出给本人。
+
+        所以取数阶段**必须**把会话里的每一行都取来（含别人的发言），
+        过滤留给 `pair_replies()`：它看过「上一条是谁说的」才能判断
+        这条回复归属谁。
+        """
+        return (
+            "from messages where bot_id=? and session_id in ("
+            "  select distinct session_id from messages where bot_id=? and owner_id=?"
+            ")"
+        )
+
+    async def count_transcript(self, bot_id: BotId, owner_id: OwnerId) -> int:
+        """可导出行数的上界：本人的发言 + 机器人回复。"""
+        owner = str(owner_id or "")
+        if not owner:
+            return 0
+        with self._lock:
+            r = self._conn.execute(
+                "select count(*) " + self._session_sql()
+                + " and (owner_id=? or role='assistant')",
+                (str(bot_id), str(bot_id), owner, owner),
+            ).fetchone()
+        return int(r[0]) if r else 0
+
+    async def transcript(self, bot_id: BotId, owner_id: OwnerId, *,
+                         limit: int) -> Sequence[Message]:
+        """取最近 N 行，按时间正序返回（文件里从旧到新读才像对话）。
+
+        SQL 侧倒序取再在 Python 里反转：直接正序 + limit 拿到的是最早的
+        N 条，导出永远是几个月前的开头，最新的对话反而看不到。
+
+        `limit` 是**原始行数**，不是最终导出行数——会话里还有别人的发言
+        要参与配对，所以调用方要放大这个窗口。
+        """
+        owner = str(owner_id or "")
+        if not owner:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "select id, session_id, owner_id, group_id, role, content, ts, summarized "
+                + self._session_sql()
+                + " order by id desc limit ?",
+                (str(bot_id), str(bot_id), owner, max(1, int(limit))),
+            ).fetchall()
+        rows.reverse()
+        return [
+            Message(
+                bot_id=bot_id,
+                session_id=SessionId(str(r[1])),
+                role=_role(r[4]),
+                content=str(r[5]),
+                ts=float(r[6]),
+                id=int(r[0]),
+                sender_id=str(r[2] or ""),
+                group_id=str(r[3] or ""),
+                summarized=bool(r[7]),
             )
             for r in rows
         ]
