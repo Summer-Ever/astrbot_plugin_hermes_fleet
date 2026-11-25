@@ -105,12 +105,31 @@ except ImportError:  # pragma: no cover
         return os.path.join("data", "plugin_data", "astrbot_plugin_hermes_fleet")
 
 
-# 动态注入优先走临时 content part：它不进会话历史，也就不会每轮重发
-# 一遍、把提示词缓存打穿。老版本没有这个能力才退回 system_prompt。
+# 动态注入的主路径是「往上下文里插一条 _no_save 的独立消息」（见
+# `_insert_before_user_message`）：位置在用户发言之前，且不进会话历史。
+# 临时 content part 只作老宿主兜底（它一定落在用户发言之后）。
 try:
     from astrbot.core.agent.message import TextPart
 except ImportError:  # pragma: no cover
     TextPart = None
+
+
+def _host_supports_no_save() -> bool:
+    """宿主是否支持「这条消息发给模型、但不写进对话历史」。
+
+    判据用 Message 的私有属性表：宿主注入人设情景预设用的就是 `_no_save`
+    标记（`req.contexts[:0] = begin_dialogs`，每条都带这个标记），有这个
+    字段就说明整条链路都在——发请求时剥掉标记、存历史时跳过这条。
+
+    探测不到就返回 False：宁可退回临时片段（在用户发言之后），也不冒
+    「标记被原样发给服务商导致 400」的风险。
+    """
+    try:
+        from astrbot.core.agent.message import Message
+
+        return "_no_save" in getattr(Message, "__private_attributes__", {})
+    except Exception:  # pragma: no cover - 宿主结构变了就当不支持
+        return False
 
 from hermes_contracts import (  # noqa: E402
     MAX_RESIDENT_BLOCK_CHARS,
@@ -489,29 +508,32 @@ class HermesFleet(Star):
             logger.error(f"[hermes_fleet] 注入失败:\n{traceback.format_exc(limit=6)}")
 
     def _place_block(self, req: ProviderRequest, block: str) -> None:
-        """把注入块放到本轮请求里。位置由 `inject_to_system_prompt` 决定。
+        """把注入块放到本轮请求里。**位置**固定在用户当前发言之前，
+        **权威性**由 `inject_to_system_prompt` 决定。
 
-        两种位置的差别不是风格问题：
+        两个维度是分开的：
 
-        - **用户提示词**（默认）：作为临时 content part 拼进本轮用户消息，
-          不进会话历史。模型把它当「用户给我的资料」，与系统人格设定的
-          优先级隔开一层——词条正文来自历史对话，可能被群友写过，这一层
-          隔离是白拿的。代价是「规则与避雷」这类内容也只是资料，不是命令。
-        - **系统提示词尾部**：权威性上来了，模型更倾向把它当硬约束遵守；
-          代价是它和人格设定同级，词条里的指令腔更容易被当真，而且部分
-          服务商的系统提示词缓存会按「整段指纹」命中，改一个词就整段失效。
+        - **位置**（本方法负责）：常驻画像是「关于这个用户的事实」，读在
+          用户发言之前才合语义——模型先知道「他是谁、忌什么」，再看这轮
+          说了什么。系统提示词路由天然满足（它在所有对话之前）；用户
+          提示词路由靠往上下文里插一条独立消息达成（见
+          `_insert_before_user_message`）。
+        - **权威性**（开关负责）：系统提示词 → 与人格设定同级，模型更倾向
+          当硬约束；用户提示词 → 与人格隔一层，词条正文来自历史对话、
+          可能被群友写过，这一层隔离是白拿的。代价是「规则与避雷」这类
+          内容也只是资料，不是命令。
 
-        默认取前者，因为常驻的本职是「提供事实」而不是「下达命令」，
-        强约束需求（不许骂人、必须报价格）本来就该写在人设里。
+        默认取后者：常驻的本职是「提供事实」而不是「下达命令」，强约束
+        需求（不许骂人、必须报价格）本来就该写在人设里。
         """
-        # 同一轮请求里只放一份。工具循环里宿主可能复用 ProviderRequest，
-        # 而 extra_user_content_parts 没有 append_system_prompt 那种幂等检查；
-        # 靠 _inject_guard 的 TTL 挡不住「query 变了但请求对象没换」的情况。
-        # 判据只看块首标记，不依赖调用方状态。
+        # 同一轮请求里只放一份。判据只看块首标记，不依赖调用方状态。
         present = [getattr(req, "system_prompt", "")]
         parts = getattr(req, "extra_user_content_parts", None)
         if parts:
             present.extend(parts)
+        contexts = getattr(req, "contexts", None)
+        if isinstance(contexts, list):
+            present.extend(contexts)
         if has_inject_block(present):
             return
 
@@ -519,16 +541,48 @@ class HermesFleet(Star):
         if prefer_system and hasattr(req, "system_prompt"):
             req.system_prompt = append_system_prompt(req.system_prompt or "", block)
             return
+        if self._insert_before_user_message(req, block):
+            return
+        # 老宿主兜底：没有上下文列表、也不支持 _no_save 时，退回临时片段。
+        # 代价是块会落在用户发言**之后**（宿主的 assemble_context 固定
+        # 先放用户原始发言），位置不如上面那条准，但仍然不进历史。
         if TextPart is not None and hasattr(req, "extra_user_content_parts"):
             part = TextPart(text=block)
             if hasattr(part, "mark_as_temp"):
                 part.mark_as_temp()
             req.extra_user_content_parts.append(part)
             return
-        # 老版本既没有临时 part、也没有可写的 system_prompt 时才走到这里；
+        # 既没有可写的 system_prompt、也没有临时 part 时才走到这里；
         # 后者其实基本不存在（ProviderRequest 一直有这个字段），留作兜底。
         if hasattr(req, "system_prompt"):  # pragma: no cover
             req.system_prompt = append_system_prompt(req.system_prompt or "", block)
+
+    @staticmethod
+    def _insert_before_user_message(req: ProviderRequest, block: str) -> bool:
+        """把常驻块作为一条独立消息插在「当前用户发言之前」。成功返回 True。
+
+        为什么不用临时片段：宿主的 `assemble_context` 固定先放用户原始发言、
+        再追加额外内容块（provider/entities.py），所以临时片段一定落在用户
+        发言**之后**。想让它排在前面，只能往上下文里插一条独立消息——
+        而当前用户发言是宿主在发请求时才拼到上下文末尾的（contexts 是历史，
+        拼完历史才轮到本轮发言），所以「追加到 contexts 末尾」正好落在它前面。
+
+        插进去的消息带 `_no_save`：宿主注入人设情景预设用的就是同一个机制
+        （`req.contexts[:0] = begin_dialogs`，每条都标 `_no_save`）——
+        发给模型、但不写进对话历史。
+        """
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list) or not _host_supports_no_save():
+            return False
+        try:
+            contexts.append({
+                "role": "user",
+                "content": block,
+                "_no_save": True,
+            })
+        except Exception:
+            return False
+        return True
 
     # ------------------------------------------------------------ 落库
 

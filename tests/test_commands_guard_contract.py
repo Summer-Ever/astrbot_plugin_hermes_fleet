@@ -30,6 +30,12 @@ class TestHasInjectBlock(unittest.TestCase):
     def test_content_part的text也算(self) -> None:
         self.assertTrue(has_inject_block([_Part(INJECT_OPEN), _Part("其它")]))
 
+    def test_上下文字典也算(self) -> None:
+        self.assertTrue(has_inject_block([
+            {"role": "user", "content": INJECT_OPEN + "画像", "_no_save": True}
+        ]))
+        self.assertFalse(has_inject_block([{"role": "user", "content": "普通发言"}]))
+
     def test_没有标记不算(self) -> None:
         self.assertFalse(has_inject_block(["普通用户消息", _Part("另一段")]))
         self.assertFalse(has_inject_block(None))
@@ -92,6 +98,32 @@ class TestCommandContract(unittest.TestCase):
         sys_part = place.index("append_system_prompt(")
         self.assertLess(check, user_part)
         self.assertLess(check, sys_part)
+
+
+class TestInjectPlacement(unittest.TestCase):
+    """常驻块的位置：必须在用户本轮发言之前。"""
+
+    def test_主路径是往上下文插一条独立消息(self) -> None:
+        place = MAIN.split("def _place_block", 1)[1].split("\n    # ---", 1)[0]
+        insert = place.index("_insert_before_user_message(req, block)")
+        fallback = place.index("extra_user_content_parts.append(")
+        self.assertLess(insert, fallback, "插上下文必须优先于退回临时片段")
+
+    def test_插入的消息带no_save且角色为user(self) -> None:
+        fn = MAIN.split("def _insert_before_user_message", 1)[1].split(
+            "\n    # ---", 1)[0]
+        self.assertIn('"role": "user"', fn)
+        self.assertIn('"_no_save": True', fn)
+        self.assertIn("contexts.append(", fn)
+
+    def test_宿主能力探测存在且fail_closed(self) -> None:
+        fn = MAIN.split("def _host_supports_no_save", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("__private_attributes__", fn)
+        self.assertIn("return False", fn)  # 探测不到就当不支持
+
+    def test_查重范围包含上下文(self) -> None:
+        place = MAIN.split("def _place_block", 1)[1].split("\n    # ---", 1)[0]
+        self.assertIn('getattr(req, "contexts", None)', place)
 
 
 class TestAddressFilter(unittest.TestCase):

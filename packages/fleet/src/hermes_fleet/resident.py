@@ -501,16 +501,19 @@ def render_inject(blocks: dict[ResidentBlock, str], *, is_group: bool,
 def has_inject_block(parts) -> bool:
     """这批文本里是否已经有过本插件的注入块。
 
-    工具调用循环里宿主可能复用同一个 `ProviderRequest`，`on_llm_request`
-    每轮都会被调用；`extra_user_content_parts` 没有系统提示词那样的幂等
-    检查，拼两次模型就会看到两份完全一样的常驻画像。判据用块首的
-    `INJECT_OPEN` 标记，不依赖调用方记状态。
+    同一轮请求里只该有一份常驻画像。判据用块首的 `INJECT_OPEN` 标记，
+    不依赖调用方记状态——系统提示词那条路有 `append_system_prompt` 自己
+    的幂等检查，往上下文里插消息那条路没有，就得在这里统一兜住。
 
-    `parts` 里的元素可以是字符串，也可以是带 `.text` 的 content part
-    （AstrBot 的 `TextPart` 就是这种）——所以这里不写死类型。
+    `parts` 里的元素可以是字符串、带 `.text` 的 content part（AstrBot 的
+    `TextPart`），也可以是上下文字典（`{"role": ..., "content": ...}`），
+    所以这里不写死类型。
     """
     for part in parts or ():
-        text = getattr(part, "text", part)
+        if isinstance(part, dict):
+            text = part.get("content", "")
+        else:
+            text = getattr(part, "text", part)
         if INJECT_OPEN in str(text or ""):
             return True
     return False

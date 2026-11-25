@@ -96,8 +96,14 @@ class TestConfig(unittest.TestCase):
         self.assertIn("check_export_size(", MAIN)
         self.assertIn('_save("chat", chat_doc)', MAIN)
         self.assertIn('_save("memory", cfg_doc)', MAIN)
-        # 超限必须一个文件都不发，避免只发出一半
-        self.assertLess(MAIN.index("check_export_size("), MAIN.index("_save("))
+        # 超限必须一个文件都不发，避免只发出一半。
+        # 只在导出流程内部比位置：全文搜 "_save(" 会误命中别处的 "_no_save("。
+        flow = MAIN.split("async def _export_flow", 1)[1].split(
+            "\n    @filter.command", 1)[0]
+        self.assertLess(
+            flow.index("check_export_size("),
+            flow.index('_save("memory", cfg_doc)'),
+        )
 
     def test_import块与解析函数在导出模块里(self) -> None:
         self.assertIn("IMPORT_OPEN", EXPORT_SRC)
