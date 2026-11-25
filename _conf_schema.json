@@ -44,8 +44,32 @@
   "llm_provider_id": {
     "type": "string",
     "default": "",
-    "description": "总结用的模型 ID",
-    "hint": "留空则跟随当前对话模型。建议显式指定：长期记忆的归纳风格不宜随主体换模型而漂移，事后也没法归因。填 AstrBot 里模型配置的 ID。"
+    "description": "主模型 ID（单值，兼容旧配置）",
+    "hint": "留空则跟随当前对话模型。建议显式指定：长期记忆的归纳风格不宜随主体换模型而漂移，事后也没法归因。配了下面的「降级链」时，这里留空即可，链里第一个就是主模型。"
+  },
+  "llm_provider_ids": {
+    "type": "string",
+    "description": "降级链（逗号分隔的模型 ID，第一个是主模型）",
+    "hint": "例：deepseek/deepseek-flash,zhipu/glm-4.7-flash,openrouter/nemotron。留空则只用上面那一个，或跟随 AstrBot 当前对话模型。后台总结用户看不见，主模型挂掉时靠这条链兜底。",
+    "default": ""
+  },
+  "llm_retry_times": {
+    "type": "int",
+    "description": "单个模型内重试次数（不含首次）",
+    "hint": "只对网络抖动/限流/5xx 生效。鉴权错、模型不存在、上下文超长不会重试，直接换下一个。",
+    "default": 1
+  },
+  "llm_retry_base_seconds": {
+    "type": "float",
+    "description": "重试退避基数（秒，指数递增）",
+    "hint": "0.8 表示第 1 次等 0.8~1.2 秒。单次等待硬上限 15 秒，避免后台任务卡住。",
+    "default": 0.8
+  },
+  "llm_cooldown_seconds": {
+    "type": "int",
+    "description": "模型失败后的冷却时长（秒）",
+    "hint": "冷却期间该模型排在队尾。0 表示不冷却。设太小会让每一轮都先撞一遍坏模型。",
+    "default": 180
   },
   "summarize_interval_minutes": {
     "type": "int",

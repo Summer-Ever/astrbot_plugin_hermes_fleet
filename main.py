@@ -84,15 +84,17 @@ except ImportError:  # pragma: no cover
     TextPart = None
 
 from hermes_contracts import ChatMessage, LlmResult  # noqa: E402
+from hermes_contracts.errors import Unavailable  # noqa: E402
 from hermes_fleet import BotRegistry, MemoryService  # noqa: E402
 from hermes_workers import (  # noqa: E402
     ConsolidateOutcome,
+    FallbackProvider,
     MemoryConsolidator,
     SessionSummarizer,
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -111,11 +113,20 @@ class AstrBotProvider:
     模型选择：配了 `llm_provider_id` 就用指定的那个，否则跟随 AstrBot
     当前对话模型。**推荐显式指定**——长期记忆的归纳风格不该随主体换模型
     而静默漂移，事后也没法归因是哪次换模型让记忆变味的。
+
+    失败一律翻译成契约错误（`Unavailable` / `RateLimited` / …），**不抛裸
+    RuntimeError**：外层 `FallbackProvider` 要靠错误码判断「重试这个」还是
+    「立刻换下一个」，抛裸异常会让它只能猜。`contracts.errors` 的文档里
+    批评过 hermes_core「所有异常都当可重试」，这里不能重犯。
     """
 
     def __init__(self, plugin: "HermesFleet", provider_id: str = "") -> None:
         self._plugin = plugin
         self.provider_id = str(provider_id or "").strip()
+
+    @property
+    def name(self) -> str:
+        return self.provider_id or "<当前对话模型>"
 
     def _instance(self):
         ctx = getattr(self._plugin, "context", None)
@@ -128,8 +139,10 @@ class AstrBotProvider:
                     return insts[pid]
             except Exception:
                 pass
-            # 指定的模型还没加载好（热加载/刚改配置）：不静默换模型，
-            # 直接返回 None 让调用方报错。换模型会把 A 模型的产出记在 B 名下。
+            # 指定的模型还没加载好（热加载/刚改配置）：返回 None 让调用方报错。
+            # 单模型配置下这仍然等于「不干活」——但配了降级链时，外层会把它
+            # 当成「这个暂时不可用」换下一个，这是用户显式声明过的顺序，
+            # 不属于「静默换模型」。
             return None
         try:
             return ctx.get_using_provider()
@@ -141,9 +154,11 @@ class AstrBotProvider:
                        temperature: float | None = None) -> LlmResult:
         inst = self._instance()
         if inst is None:
-            raise RuntimeError(
+            raise Unavailable(
                 "没有可用的对话模型"
-                + (f"（配置的 {self.provider_id} 未加载）" if self.provider_id else "")
+                + (f"（配置的 {self.provider_id} 未加载）" if self.provider_id else ""),
+                retry_after_s=30.0,
+                detail={"provider": self.provider_id, "reason": "not_loaded"},
             )
         # contracts.ChatMessage 只有 role/content，这里拍平成单段 prompt：
         # AstrBot 的 text_chat 接受一整段文本，我们自己把 system 段放在最前，
@@ -152,6 +167,7 @@ class AstrBotProvider:
             f"[{m.role}]\n{m.content}" if m.role != "user" else m.content
             for m in messages
         )
+        t0 = time.perf_counter()
         try:
             resp = await inst.text_chat(
                 prompt=prompt, session_id=None, request_max_retries=1
@@ -162,20 +178,24 @@ class AstrBotProvider:
             # 外层只看到「超时」，既认不出是限流也没法换模型。
             if "request_max_retries" not in str(exc):
                 raise
+            t0 = time.perf_counter()
             resp = await inst.text_chat(prompt=prompt, session_id=None)
 
-        text = str(getattr(resp, "completion_text", "") or "")
-        model = ""
-        try:
-            model = str(inst.meta().model or "")
-        except Exception:
-            model = self.provider_id
+        # 记下耗时：`LlmResult.latency_ms` 是「模型变慢」的早期预警，
+        # hermes_core 缺这个观测，退避逻辑在 provider 侧变慢时完全失效。
         return LlmResult(
-            text=text,
-            model=model,
+            text=str(getattr(resp, "completion_text", "") or ""),
+            model=self._model_name(inst),
+            latency_ms=round((time.perf_counter() - t0) * 1000, 1),
             finish_reason=_finish_reason(resp),
             usage={},
         )
+
+    def _model_name(self, inst) -> str:
+        try:
+            return str(inst.meta().model or "")
+        except Exception:
+            return self.provider_id
 
 
 def _finish_reason(resp) -> str:
@@ -218,7 +238,12 @@ class HermesFleet(Star):
             recall_k=int(self._get_cfg("recall_k", 5)),
         )
         self._inject_guard: dict[str, float] = {}
-        self.provider = AstrBotProvider(self, str(self._get_cfg("llm_provider_id", "") or ""))
+        self.provider = FallbackProvider(
+            self._provider_chain(),
+            retry_times=int(self._get_cfg("llm_retry_times", 1)),
+            retry_base_s=float(self._get_cfg("llm_retry_base_seconds", 0.8)),
+            cooldown_s=float(self._get_cfg("llm_cooldown_seconds", 180)),
+        )
         self.summarizer = SessionSummarizer(
             self.provider,
             min_messages=int(self._get_cfg("summarize_min_messages", 8)),
@@ -244,6 +269,39 @@ class HermesFleet(Star):
             return self.config.get(key, default)
         except Exception:
             return default
+
+    def _provider_chain(self) -> list[tuple[str, AstrBotProvider]]:
+        """按配置拼出降级链：主模型 → 降级 1 → 降级 2 …
+
+        `llm_provider_ids` 是逗号/换行分隔的 provider id 列表，顺序即优先级；
+        留空时退回老的 `llm_provider_id`（单值），再留空就跟随 AstrBot 当前
+        对话模型。
+
+        为什么允许留空跟随当前模型：小规模部署（一两个 bot）没必要指定，
+        跟随主体最省事。但**跑上百个账号时应当显式配链**——上百个 bot 的
+        后台总结同时抽风，靠人工发现是来不及的。
+        """
+        raw = str(self._get_cfg("llm_provider_ids", "") or "")
+        ids = [x.strip() for x in raw.replace("\n", ",").replace("，", ",").split(",")
+               if x.strip()]
+        if not ids:
+            single = str(self._get_cfg("llm_provider_id", "") or "").strip()
+            if single:
+                ids = [single]
+        if not ids:
+            ids = [""]
+
+        chain: list[tuple[str, AstrBotProvider]] = []
+        seen: set[str] = set()
+        for pid in ids:
+            key = pid or "\x00current"
+            if key in seen:
+                # 同一个 provider 配两遍：降级到它没有意义，还会让冷却表互相污染。
+                continue
+            seen.add(key)
+            inst = AstrBotProvider(self, pid)
+            chain.append((inst.name, inst))
+        return chain
 
     @staticmethod
     def _platform_id(event: AstrMessageEvent) -> str:
@@ -446,6 +504,7 @@ class HermesFleet(Star):
             f"当前场景：{scope}\n"
             f"归档记忆 {mine['memories']} 条，常驻词条 {mine['resident']} 条，"
             f"消息 {mine['messages']} 条（未总结 {mine['unsummarized']}）\n"
+            f"【模型链】{self.provider.summary()}\n"
             f"【全局】库目录 {st['root']}，已打开 {st['opened']}/{st['max_open']}，"
             f"磁盘上 {len(st['files_on_disk'])} 个账号库"
         )

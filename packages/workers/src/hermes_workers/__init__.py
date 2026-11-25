@@ -1,6 +1,7 @@
 """hermes_workers —— 后台任务。只依赖 `hermes_contracts` 的端口，不碰具体存储。"""
 
 from .consolidate import ConsolidateOutcome, MemoryConsolidator
+from .fallback import FallbackProvider, as_contract_error, classify
 from .pairing import bigrams, build_groups, normalize, similarity
 from .prompt import (
     BATCH_LIMIT,
@@ -32,7 +33,10 @@ __all__ = [
     "parse_memories",
     "similarity",
     "ConsolidateOutcome",
+    "FallbackProvider",
     "MemoryConsolidator",
     "SessionSummarizer",
     "SummaryOutcome",
+    "as_contract_error",
+    "classify",
 ]
