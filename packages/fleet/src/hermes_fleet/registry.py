@@ -111,6 +111,108 @@ class BotRegistry:
         with self._lock:
             return sorted(set(self._index.values()))
 
+    # ------------------------------------------------------------ 账号盘点
+
+    def accounts(self) -> list[dict]:
+        """列出全部账号及其文件元数据。**不打开任何数据库连接。**
+
+        这是 WebUI 账号索引页的唯一数据源。为什么必须零连接：`max_open`
+        默认 24，100 个账号逐个 `get()` 会触发反复驱逐——每次驱逐要
+        checkpoint 再关库，每次打开要读 WAL、跑迁移检查。一页概览把
+        整个 LRU 搅一遍，既慢又会把正在被注入路径使用的连接挤掉。
+
+        能拿到什么、拿不到什么，要分清楚：
+        - **拿得到**（纯文件系统）：体积、最后写入时间、是否已打开。
+          WAL 模式下最近的写还在 `-wal` 里，所以 mtime 取主库与 wal 的较大值。
+        - **拿不到**：记忆条数、未总结条数。这些必须查库，只能走
+          `probe()`（有并发上限）或单账号详情页。
+
+        两类异常都要显式标出来，否则运维时会误判成「这个账号没有记忆」：
+        - `orphan`：磁盘上有库文件，索引里没有对应 platform_id（手工拷贝、
+          索引损坏、或从别的机器搬过来）。
+        - `missing`：索引里有账号，但库文件不见了（误删、盘挂了）。
+        """
+        with self._lock:
+            index = dict(self._index)
+            opened = set(self._open)
+        by_stem = {stem: pid for stem, pid in index.items()}
+
+        try:
+            files = sorted(f for f in os.listdir(self.root) if f.endswith(".db"))
+        except OSError:
+            files = []
+
+        out: list[dict] = []
+        seen: set[str] = set()
+        for name in files:
+            stem = name[:-3]
+            seen.add(stem)
+            pid = by_stem.get(stem)
+            out.append(self._row(pid, stem, name, opened))
+        for stem, pid in by_stem.items():
+            if stem in seen:
+                continue
+            out.append({
+                "platform_id": pid, "stem": stem, "file": "",
+                "size_bytes": 0, "wal_bytes": 0, "last_write_at": 0.0,
+                "opened": pid in opened, "orphan": False, "missing": True,
+            })
+
+        # 按最后写入倒序：运维最关心「哪个账号最近不动了」，排前面才有用。
+        out.sort(key=lambda r: -(r["last_write_at"] or 0))
+        return out
+
+    def _row(self, pid: str | None, stem: str, name: str,
+             opened: set[str]) -> dict:
+        path = os.path.join(self.root, name)
+        size = 0
+        wal = 0
+        last = 0.0
+        for suffix, key in (("", "size"), ("-wal", "wal"), ("-shm", None)):
+            try:
+                st = os.stat(path + suffix)
+            except OSError:
+                continue
+            if key == "size":
+                size = st.st_size
+            elif key == "wal":
+                wal = st.st_size
+            # shm 只影响「最近活动」判断，不计入体积：它是共享内存索引，
+            # 正常 checkpoint 后会消失，算进占用会让人误以为库在膨胀。
+            last = max(last, st.st_mtime)
+        return {
+            "platform_id": pid or "",
+            "stem": stem,
+            "file": name,
+            "size_bytes": size,
+            "wal_bytes": wal,
+            "last_write_at": last,
+            "opened": bool(pid) and pid in opened,
+            # 索引里查不到 platform_id：文件名是 slug+hash，不可逆，
+            # 所以只能如实告诉界面「这个库不知道属于谁」。
+            "orphan": not pid,
+            "missing": False,
+        }
+
+    def index_of(self, stem: str) -> str:
+        """文件名主干 → platform_id，查不到返回空串。"""
+        with self._lock:
+            return self._index.get(str(stem), "")
+
+    def has_account(self, platform_id: str) -> bool:
+        """这个 platform_id 是否登记在册。
+
+        详情页与删除入口必须先用它校验：`platform_id` 来自前端，若不校验
+        就直接 `get()`，一个没登记过的 id 会**新建**一个空库——页面上看起来
+        「打开了一个空账号」，实际已经污染了磁盘。
+        """
+        with self._lock:
+            return bot_file_stem(platform_id) in self._index
+
+    def is_open(self, platform_id: str) -> bool:
+        with self._lock:
+            return str(platform_id or UNKNOWN_BOT) in self._open
+
     # ------------------------------------------------------------ 路径
 
     def db_path(self, platform_id: str) -> str:

@@ -21,3 +21,6 @@ benchmarks/out/
 .idea/
 *.swp
 .DS_Store
+
+# 管理台本地预览（mock 数据 + 截图，不入库）
+_preview/

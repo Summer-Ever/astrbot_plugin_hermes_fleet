@@ -94,7 +94,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.5.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -684,9 +684,41 @@ class HermesFleet(Star):
             f"已有 {len(st['files_on_disk'])} 个账号库，"
             f"最多同时打开 {st['max_open']} 个"
         )
+        self._register_web_apis()
         if bool(self._get_cfg("summarize_enabled", True)):
             self._bg_task = asyncio.create_task(self._bg_loop())
             logger.info("[hermes_fleet] 自动总结已启动")
+
+    def _register_web_apis(self) -> None:
+        """挂载管理台接口（页面见 views/fleet/）。
+
+        导入用三级兜底，理由同 hermes_core：真实部署里插件未必以包的形式
+        被加载，`from .webapi import ...` 会失败，需要退化到同名模块或
+        直接按文件加载。任何一种都能工作时，不要把它们删掉「简化」——
+        删掉之后只在某些部署方式下才炸，而且炸在加载期，很难归因。
+        """
+        try:
+            try:
+                from .webapi import FleetWebAPI
+            except ImportError:
+                try:
+                    from webapi import FleetWebAPI
+                except ImportError:
+                    import importlib.util
+
+                    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "webapi.py")
+                    spec = importlib.util.spec_from_file_location("fleet_webapi", path)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    FleetWebAPI = mod.FleetWebAPI
+            self._web_api = FleetWebAPI(self, PLUGIN_VERSION)
+            self._web_api.register()
+            logger.info("[hermes_fleet] 管理台接口已注册：/views/fleet/")
+        except Exception:
+            # 页面注册失败不能影响记忆功能本身：注入、落库、总结都不依赖它。
+            logger.error(f"[hermes_fleet] 注册管理台接口失败：\n"
+                         f"{traceback.format_exc(limit=5)}")
 
     async def terminate(self):
         """关停时先停后台任务，再逐库 checkpoint + 关连接。

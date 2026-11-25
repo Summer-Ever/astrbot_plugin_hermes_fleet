@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fleet 账号台 · 长期记忆</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <div class="mark">F</div>
+        <div>
+          <strong>Fleet 账号台</strong>
+          <small>百账号记忆运维</small>
+        </div>
+      </div>
+
+      <div class="side-block">
+        <div class="side-title">容量</div>
+        <div class="line"><span>账号</span><b id="s-accounts">—</b></div>
+        <div class="line"><span>磁盘占用</span><b id="s-bytes">—</b></div>
+        <div class="line"><span>连接占用</span><b id="s-open" title="已打开 / 上限。到顶后每次访问新账号都要驱逐一个旧连接">—</b></div>
+      </div>
+
+      <div class="side-block">
+        <div class="side-title">异常</div>
+        <div class="line"><span>静默</span><b id="s-stale">—</b></div>
+        <div class="line"><span>孤立库</span><b id="s-orphan" title="磁盘上有库文件，但索引里没有对应账号">—</b></div>
+        <div class="line"><span>丢失库</span><b id="s-missing" title="索引里有账号，但库文件不见了">—</b></div>
+      </div>
+
+      <div class="side-block" id="model-block">
+        <div class="side-title">模型链</div>
+        <div class="model-line" id="m-chain">—</div>
+        <div class="model-line dim" id="m-fail">—</div>
+      </div>
+
+      <div class="side-foot">
+        <div class="line"><span>版本</span><b id="s-version">—</b></div>
+        <div class="line"><span>库目录</span><b id="s-root" class="ellipsis" title="">—</b></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div id="banner" class="banner hidden">
+        当前页面没有连上 AstrBot 面板，接口不可用。请从 AstrBot WebUI 的插件页面入口打开。
+      </div>
+
+      <header class="topbar">
+        <div>
+          <h1>账号索引</h1>
+          <p>哪个账号已经停止记记忆了——这一页不打开任何数据库连接</p>
+        </div>
+        <div class="top-actions">
+          <button class="btn ghost" id="btn-health">健康</button>
+          <button class="btn primary" id="btn-refresh">刷新</button>
+        </div>
+      </header>
+
+      <section class="alerts" id="alerts"></section>
+
+      <section class="toolbar">
+        <input class="input grow" id="q" type="search" placeholder="按账号 ID 或文件名搜索" />
+        <select class="input" id="sort">
+          <option value="recent">最近写入</option>
+          <option value="size">占用最大</option>
+          <option value="name">按名称</option>
+        </select>
+        <button class="btn" id="btn-probe" title="对当前页的账号逐个打开取真实统计，用完立即关库">
+          取统计
+        </button>
+      </section>
+
+      <section class="panel">
+        <table class="table">
+          <thead>
+            <tr>
+              <th class="w-40p">账号</th>
+              <th class="w-90">占用</th>
+              <th class="w-130">最后写入</th>
+              <th class="w-90">记忆</th>
+              <th class="w-90">未总结</th>
+              <th class="w-110">状态</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="empty hidden" id="empty">还没有任何账号库文件。</div>
+      </section>
+
+      <footer class="pager">
+        <span id="page-info">—</span>
+        <div class="pager-btns">
+          <button class="btn ghost" id="prev">上一页</button>
+          <button class="btn ghost" id="next">下一页</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <div class="drawer-mask hidden" id="mask"></div>
+  <aside class="drawer hidden" id="drawer">
+    <header class="drawer-head">
+      <div>
+        <h2 id="d-title">—</h2>
+        <p id="d-sub">—</p>
+      </div>
+      <button class="btn ghost" id="d-close">关闭</button>
+    </header>
+    <div class="drawer-body" id="d-body"></div>
+  </aside>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

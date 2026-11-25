@@ -305,3 +305,42 @@ class MemoryService:
     async def bot_stats(self, platform_id: str) -> dict[str, int]:
         db = self.registry.get(str(self.bot_of(platform_id)))
         return db.stats()
+
+    async def probe(self, platform_ids: list[str], *, limit: int = 20) -> list[dict]:
+        """逐个打开指定账号取真实统计，**用完立刻关掉**。
+
+        为什么必须设上限并主动关闭：`stats()` 不算便宜（要数四张表），而
+        一次打开 100 个库会把 LRU 整个冲掉——正在被注入路径使用的连接被
+        驱逐，下一个用户发言就得多付一次冷启动。所以这里宁可变慢、宁可
+        分页，也不批量常驻。
+
+        为什么关掉而不是留着：这是用户手动点「刷新」才走一次的低频路径，
+        留着只会白占 LRU 名额。关掉后下次注入重开一次约 7.6ms，可以接受。
+
+        为什么整个循环里不 `await`：AstrBot 是单事件循环，`stats()` 是同步
+        调用，只要中间不让出控制权，就不可能有关掉别人正在用的连接这类交错。
+        一旦这里插入 `await`，这个前提就不成立了——改动时要注意。
+        """
+        out: list[dict] = []
+        for pid in list(platform_ids or [])[:max(0, int(limit))]:
+            pid = str(pid or "").strip()
+            if not pid:
+                continue
+            if not self.registry.has_account(pid):
+                # 不认识的 id 绝不能 get()：那会凭空新建一个空库文件。
+                out.append({"platform_id": pid, "error": "not_indexed"})
+                continue
+            was_open = self.registry.is_open(pid)
+            try:
+                st = self.registry.get(pid).stats()
+            except Exception as exc:  # noqa: BLE001 — 单个库坏不能拖垮整页
+                out.append({"platform_id": pid, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            finally:
+                if not was_open:
+                    try:
+                        self.registry.close_bot(pid)
+                    except Exception:
+                        pass
+            out.append({"platform_id": pid, "stats": st})
+        return out
