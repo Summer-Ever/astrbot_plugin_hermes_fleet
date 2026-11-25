@@ -111,9 +111,14 @@ try:
 except ImportError:  # pragma: no cover
     TextPart = None
 
-from hermes_contracts import ChatMessage, LlmResult  # noqa: E402
+from hermes_contracts import (  # noqa: E402
+    MAX_RESIDENT_BLOCK_CHARS,
+    ChatMessage,
+    LlmResult,
+    ResidentBlock,
+)
 from hermes_contracts.errors import Unavailable  # noqa: E402
-from hermes_fleet import BotRegistry, MemoryService  # noqa: E402
+from hermes_fleet import BLOCK_LABELS, BotRegistry, MemoryService  # noqa: E402
 from hermes_workers import (  # noqa: E402
     ConsolidateOutcome,
     FallbackProvider,
@@ -122,7 +127,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.7.1"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -530,22 +535,38 @@ class HermesFleet(Star):
     @filter.llm_tool(name="update_resident")
     async def tool_update_resident(self, event: AstrMessageEvent, block: str,
                                    text: str) -> str:
-        """维护每轮都会注入的常驻词条。整段覆盖，不是追加。
+        """整段改写一个常驻词条（传空文本 = 清空该词条）。
 
-        用户要求记住/修改/忘掉稳定信息，或本轮对话表明某词条已过时，就调用本工具。
-        写入前先看注入块里的现有内容，把该保留的部分一起写进去——这是覆盖，不是追加，漏写等于删掉。
+        常驻是六个词条的纯文本，每轮都注入：address（称呼）、assistant（助手设定）、
+        user（用户信息）、preference（偏好与忌讳）、style（回复风格）、rules（规则与避雷）。
+        本工具用新文本**整段覆盖**该词条——词条没有编号、没有「一条一条」，
+        要改哪句话，就在现文基础上把那句话改掉后整段写回。
+
+        只在用户明确要求记住/修改/遗忘这类稳定信息时调用（改称呼、改偏好、
+        情况变了、「别记着我的XX」）：先对照本轮注入里的 [长期稳定信息] 词条现文，
+        把变化合并进整段文本再写回；整段都不需要了才传空文本清空。
+        用户没提的事不要擅自改写常驻——后台总结碰不到常驻，你也不代替用户做主。
+
+        词条按场景隔离：私聊改的是私聊那套，群里改的是本群那套，互不影响。
 
         Args:
-            block (string): 词条名，address/assistant/user/preference/style/rules 之一，分别对应 称呼/助手设定/用户信息/偏好与忌讳/回复风格/规则与避雷
-            text (string): 该词条的完整新文本，传空字符串表示清空这个词条
+            block (string): 词条名，六选一——address/assistant/user/preference/style/rules
+                （或中文：称呼/助手设定/用户信息/偏好与忌讳/回复风格/规则与避雷）
+            text (string): 该词条的完整新文本（整段替换，不是追加）；空文本 = 清空该词条
         """
         scene = await self.svc.scene(**self._scene_args(event))
         try:
-            await self.svc.set_resident(scene, str(block or ""), str(text or ""))
+            entry = await self.svc.set_resident(scene, str(block or ""), str(text or ""))
         except ValueError as exc:
-            return f"{exc}"
-        scope = "本群" if scene.is_group else "私聊"
-        return f"已更新常驻词条（{scope}）：{block}{'（已清空）' if not str(text or '').strip() else ''}"
+            return str(exc)
+        label = BLOCK_LABELS.get(entry.block, entry.block.value)
+        where = "本群" if scene.is_group else "私聊"
+        if not entry.text:
+            return f"已清空{where}的「{label}」词条。"
+        return (
+            f"已更新{where}的「{label}」词条"
+            f"（{len(entry.text)}/{MAX_RESIDENT_BLOCK_CHARS} 字）：{entry.text}"
+        )
 
     @filter.llm_tool(name="forget_memory")
     async def tool_forget_memory(self, event: AstrMessageEvent, memory_id: int) -> str:
@@ -623,6 +644,33 @@ class HermesFleet(Star):
             "注：QQ 官方适配器的 sender_id 是 per-bot 的 openid，"
             "同一个人在群里与私聊是两个值。"
         )
+
+    @fleet.command("常驻")
+    async def fleet_resident(self, event: AstrMessageEvent):
+        """看当前场景（私聊 / 本群）的六个常驻词条。
+
+        存在的意义是「可观测」：用户说「以后叫我阿明」之后，得有个地方能
+        确认模型到底写没写进去。没有这条命令时，唯一的检查手段是进面板翻
+        数据库，等于「记住了吗」只能靠机器人自己说。
+        """
+        scene = await self.svc.scene(**self._scene_args(event))
+        values = await self.svc.resident_snapshot(scene)
+        where = f"本群（{scene.group_id}）" if scene.is_group else "私聊"
+        lines = [f"【{where}常驻词条】"]
+        filled = 0
+        for block in ResidentBlock.ordered():
+            label = BLOCK_LABELS.get(block, block.value)
+            text = str(values.get(block.value, "") or "").strip()
+            if text:
+                filled += 1
+                lines.append(f"- {label}：{text}")
+            else:
+                lines.append(f"- {label}：（空）")
+        lines.append(
+            f"共 {filled}/6 条。改法：直接对我说「以后叫我阿明」"
+            "「别记着我不吃辣」，我会自己改这一套。"
+        )
+        yield event.plain_result("\n".join(lines))
 
     @fleet.command("总结")
     async def fleet_summarize(self, event: AstrMessageEvent):

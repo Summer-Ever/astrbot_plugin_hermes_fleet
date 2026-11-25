@@ -41,6 +41,8 @@ from hermes_contracts import (
     clip,
 )
 
+from .resident import clean_text
+
 # 一次读多少条未总结消息的上限。消息正文可能很长，管理台只需要看「攒了什么」，
 # 不需要全量搬运；真正的总结由 worker 分会话做。
 MSG_PER_SESSION = 20
@@ -274,7 +276,12 @@ async def save_resident(
     *,
     now: float | None = None,
 ) -> dict:
-    """整段覆盖一个词条。空串 = 清空该槽位。"""
+    """整段覆盖一个词条。空串 = 清空该槽位。
+
+    这里只净化、不做指令腔拒绝：管理台是管理员本人手写，知情且有意，
+    「规则：本群禁止发广告」本来就该能写进 rules 词条。拒绝是给模型那条
+    路径准备的——它可能把群友的话原样抄进词条。
+    """
     try:
         target = ResidentBlock(str(block))
     except ValueError as exc:
@@ -285,7 +292,7 @@ async def save_resident(
         owner_id=owner_id,
         scope=_scope_of(scope_key),
         block=target,
-        text=str(text or EMPTY).strip(),
+        text=clean_text(text),
         updated_ts=_now(now),
     ))
     return {"block": entry.block.value, "text": entry.text, "updated_ts": entry.updated_ts}

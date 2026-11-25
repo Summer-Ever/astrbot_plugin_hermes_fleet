@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 from hermes_contracts import (
     EMPTY,
+    MAX_MEMORY_CHARS,
+    MAX_RESIDENT_BLOCK_CHARS,
     BotId,
     Memory,
     MemoryId,
@@ -32,38 +34,24 @@ from hermes_contracts import (
     SessionId,
     Visibility,
     clip,
-    MAX_MEMORY_CHARS,
 )
 from hermes_recall import rerank, render
 
 from .registry import BotRegistry, UNKNOWN_BOT, bot_id_of
 
-# 六词条的中文标签。放在这里而不是契约层：它是「给模型看的措辞」，
-# 属于产品文案，会随运营口味调，不该让契约包跟着改版本。
-BLOCK_LABELS: dict[ResidentBlock, str] = {
-    ResidentBlock.ADDRESS: "称呼",
-    ResidentBlock.ASSISTANT: "助手设定",
-    ResidentBlock.USER: "用户信息",
-    ResidentBlock.PREFERENCE: "偏好与忌讳",
-    ResidentBlock.STYLE: "回复风格",
-    ResidentBlock.RULES: "规则与避雷",
-}
-
-INJECT_HEADER = "[长期稳定信息（每轮必带）]"
-
-# 这两段每次注入都在，但很短。它们的作用是「告诉模型该动哪个工具」，
-# 不复述工具用法——schema 每轮都在上下文里，复述只是白烧 token。
-MAINT_NOTES = (
-    "[记忆使用约定] 需要回忆过去的具体细节时，先调用 search_memory 检索，"
-    "不要凭印象编造；检索不到就如实说没有记录，不要说「我的记忆被清空了」。",
-    "[常驻维护] 用户要求记住、修改或忘掉稳定信息时，本轮调用 update_resident 处理；"
-    "后台任务不会替你维护常驻。",
+# 文案与词条解析都在 resident.py：那一层是「模型怎么被引导去改常驻」，
+# 和本模块的存储/检索职责分开，测试也不用起数据库。
+# 这里 re-export 是为了 `hermes_fleet.BLOCK_LABELS` 这类旧引用不失效。
+from .resident import (  # noqa: F401
+    BLOCK_LABELS,
+    INJECT_HEADER,
+    MAINT_NOTES,
+    MAX_INJECT_CHARS,
+    clean_text,
+    is_injection,
+    render_inject,
+    resolve_block,
 )
-
-# 注入块总长上限。六词条满配是 6 × 2000 字符 = 12000，全塞进去会挤掉真正的
-# 对话。这里用字符预算硬截断，宁可丢掉尾部词条也不让注入失控——
-# hermes_core 早期就是没有这个上限，一次误写把整轮上下文占满。
-MAX_INJECT_CHARS = 4_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,27 +127,25 @@ class MemoryService:
         归档记忆**故意不自动注入**。每轮把检索结果塞进上下文，代价是固定的
         （几千字符），收益却随查询波动——大多数轮次捞回来的是噪声，还会把
         真正的用户发言挤到后面。召回改成模型主动调 `search_memory`。
+
+        `query` 只用于「用户是不是在说自己的情况变了」这一个判断：命中就
+        多一行明确指令，让模型去核对词条，而不是顺着话回一句「恭喜」。
         """
         db = self._db(scene)
         entries = await db.resident.get_all(
             scene.bot_id, scene.owner_id, scene.resident_scope
         )
-
-        lines: list[str] = []
-        if entries:
-            lines.append(INJECT_HEADER)
-            for block in ResidentBlock.ordered():
-                entry = entries.get(block)
-                if entry is None or not entry.text.strip():
-                    continue  # 空槽不注入，注入成本才有界
-                label = BLOCK_LABELS.get(block, block.value)
-                lines.append(f"- {label}：{entry.text.strip()}")
-        lines.extend(MAINT_NOTES)
-
-        text = "\n".join(lines)
-        if len(text) > MAX_INJECT_CHARS:
-            text = clip(text, MAX_INJECT_CHARS)
-        return text
+        blocks = {
+            block: entry.text
+            for block, entry in entries.items()
+            if entry is not None and entry.text.strip()
+        }
+        return render_inject(
+            blocks,
+            is_group=scene.is_group,
+            query=query,
+            max_chars=MAX_INJECT_CHARS,
+        )
 
     # ------------------------------------------------------------ 落库
 
@@ -277,19 +263,41 @@ class MemoryService:
     # ------------------------------------------------------------ 常驻
 
     async def set_resident(self, scene: Scene, block: str, text: str) -> ResidentEntry:
-        """整段覆盖一个常驻词条。空字符串 = 清空该槽位。"""
-        try:
-            target = ResidentBlock(str(block))
-        except ValueError as exc:
-            allowed = ", ".join(b.value for b in ResidentBlock.ordered())
-            raise ValueError(f"未知词条 {block!r}，可用：{allowed}") from exc
+        """整段覆盖一个常驻词条。空字符串 = 清空该槽位。
+
+        净化、别名解析、指令腔拒绝都放在这里，而不是工具层：工具、WebUI、
+        运维命令走的是同一个入口，放在上层就得各写一遍、各漏一处。
+
+        拒绝走异常而不是返回 None：调用方（工具）需要把具体原因念给模型听，
+        模型才知道下一次该改什么——静默失败会让它以为已经写进去了。
+        """
+        target = resolve_block(block)
+        if target is None:
+            allowed = "、".join(
+                f"{b.value}（{BLOCK_LABELS[b]}）" for b in ResidentBlock.ordered()
+            )
+            raise ValueError(f"未知词条 {block!r}，可用：{allowed}")
+
+        label = BLOCK_LABELS.get(target, target.value)
+        body = clean_text(text)
+        if body and is_injection(body):
+            raise ValueError(
+                f"「{label}」词条文本带指令腔（试图改写规则或身份），已拒绝。"
+                "词条记录的是事实与偏好，不是指令。"
+            )
+        if len(body) > MAX_RESIDENT_BLOCK_CHARS:
+            raise ValueError(
+                f"「{label}」词条超长：{len(body)} 字 > 上限 "
+                f"{MAX_RESIDENT_BLOCK_CHARS} 字，请精简后整段重写。"
+            )
+
         db = self._db(scene)
         return await db.resident.upsert(ResidentEntry(
             bot_id=scene.bot_id,
             owner_id=scene.owner_id,
             scope=scene.resident_scope,
             block=target,
-            text=str(text or EMPTY).strip(),
+            text=body,
             updated_ts=self._now(),
         ))
 
