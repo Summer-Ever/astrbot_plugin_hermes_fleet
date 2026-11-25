@@ -63,6 +63,53 @@ class BotRegistry:
         self._open: dict[str, SqliteBotDb] = {}
         self._last_used: dict[str, float] = {}
         os.makedirs(self.root, exist_ok=True)
+        self._index_path = os.path.join(self.root, "_index.json")
+        self._index: dict[str, str] = self._load_index()
+
+    # ------------------------------------------------------------ 账号索引
+
+    def _load_index(self) -> dict[str, str]:
+        """`文件名主干 -> 适配器 id`。
+
+        为什么需要这张表：后台总结要回答「现在有哪些账号」，而文件名是
+        `qq-01-a1b2c3d4.db` 这种不可逆的编码（slug + hash）。没有索引，
+        重启后就只认识「这次启动之后说过话的账号」——一个昨天攒了 200 条
+        待总结消息、今天再没人说话的账号，会被永久跳过。
+
+        索引坏了不要紧：能从文件名反推的只有 slug 前缀，所以这里失败时
+        只告警并当作空索引，不影响任何读写路径。
+        """
+        try:
+            import json
+
+            with open(self._index_path, encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return {}
+
+    def _save_index(self) -> None:
+        try:
+            import json
+            import tempfile
+
+            fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                json.dump(self._index, fp, ensure_ascii=False, sort_keys=True)
+            # 先写临时文件再 rename：直接覆盖时若进程被 kill，
+            # 会留下半个 JSON，下次启动整张索引读不出来。
+            os.replace(tmp, self._index_path)
+        except Exception:
+            pass
+
+    def known_bots(self) -> list[str]:
+        """已知的全部账号（不打开任何连接）。"""
+        with self._lock:
+            return sorted(set(self._index.values()))
 
     # ------------------------------------------------------------ 路径
 
@@ -81,6 +128,9 @@ class BotRegistry:
             db = SqliteBotDb(self.db_path(bot), clock=self._clock)
             self._open[bot] = db
             self._last_used[bot] = time.time()
+            if self._index.get(bot_file_stem(bot)) != bot:
+                self._index[bot_file_stem(bot)] = bot
+                self._save_index()
             self._evict_locked()
             return db
 
@@ -118,6 +168,9 @@ class BotRegistry:
         """
         bot = str(platform_id or UNKNOWN_BOT)
         self.close_bot(bot)
+        with self._lock:
+            if self._index.pop(bot_file_stem(bot), None) is not None:
+                self._save_index()
         path = self.db_path(bot)
         removed = False
         for suffix in ("", "-wal", "-shm"):

@@ -301,6 +301,28 @@ class MessageStore(Protocol):
         """删除一个会话的全部消息（清屏 / 合规删除）。"""
         ...
 
+    async def list_pending_sessions(
+        self,
+        bot_id: BotId,
+        *,
+        limit: int = 50,
+    ) -> Sequence[tuple[SessionId, int, float]]:
+        """列出该 bot 下还有未总结消息的会话：`(会话, 待总结条数, 最后一条的时间)`。
+
+        为什么必须有这个方法：`fetch_unsummarized` 要求调用方**先知道**
+        session_id，而后台 worker 的任务恰恰是「找出哪些会话该总结」。
+        没有它，worker 只能靠内存里记过的 session 列表——重启即丢，
+        多实例下更不成立。
+
+        为什么把 `last_ts` 一起返回：总结的触发条件是「够条数**或**够久没动静」。
+        后者需要最后一条消息的时间，否则会话在说完最后一句后再没人说话时，
+        那几条消息永远等不到总结（正是最需要记住的那几句）。
+
+        排序：按 `last_ts` 升序。**最久没被处理的先处理**，而不是按会话 id
+        或随机顺序——否则活跃会话会一直挤占队列，冷会话永远轮不到。
+        """
+        ...
+
 
 @runtime_checkable
 class JobQueue(Protocol):

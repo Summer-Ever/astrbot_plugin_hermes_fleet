@@ -80,12 +80,12 @@
     },
     "hermes_workers": {
       "owner": "workers",
-      "status": "todo",
+      "status": "in_progress",
       "may_import": ["hermes_contracts"],
       "owns": ["无（编排层，通过端口调别人）"],
-      "deliverable": "summarize / consolidate / maintenance 三类 worker + 分片并发",
+      "deliverable": "summarize worker 已完成（会话 → 记忆，含注入过滤与归属校验）；consolidate / maintenance 待做。并发刻意保持 1，提速靠多实例而非堆协程",
       "test": "python run_tests.py -p workers",
-      "change_policy": "自由，但不得直接 import 任何领域包（只能吃 Protocol）"
+      "change_policy": "自由，但不得直接 import 任何领域包（只能吃 Protocol）；改提示词必须同步 test_summarize 里的归属与注入用例"
     },
     "hermes_api": {
       "owner": "api",

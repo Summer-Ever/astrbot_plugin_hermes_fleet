@@ -34,5 +34,35 @@
     "default": false,
     "description": "允许在群聊引用本人的私聊记忆",
     "hint": "默认关闭。群里的回复是当众的，一旦注入就等于当众公开私事。只在确认群内全是熟人时打开。"
+  },
+  "summarize_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "自动把会话总结成记忆",
+    "hint": "后台循环读取各账号已落库的消息，交给模型提炼跨会话成立的稳定信息，写进归档记忆。关掉后消息只落库、不压缩，检索自然什么也搜不到。"
+  },
+  "llm_provider_id": {
+    "type": "string",
+    "default": "",
+    "description": "总结用的模型 ID",
+    "hint": "留空则跟随当前对话模型。建议显式指定：长期记忆的归纳风格不宜随主体换模型而漂移，事后也没法归因。填 AstrBot 里模型配置的 ID。"
+  },
+  "summarize_interval_minutes": {
+    "type": "int",
+    "default": 15,
+    "description": "总结循环间隔（分钟）",
+    "hint": "每轮最多处理 25 个账号，按游标轮转，所以 100 个账号大约 4 轮（1 小时）覆盖一遍。调小会提高模型调用频率。"
+  },
+  "summarize_min_messages": {
+    "type": "int",
+    "default": 8,
+    "description": "多少条消息触发总结",
+    "hint": "会话累计够这么多条未总结消息就交给模型。调小会成倍增加模型调用次数，而产出大多是噪声。建议 6～12。"
+  },
+  "summarize_idle_hours": {
+    "type": "int",
+    "default": 6,
+    "description": "多久没动静也兜底总结（小时）",
+    "hint": "只按条数触发时，说完最后一句就没人再说话的会话永远等不到总结，而那几句往往最需要记住。"
   }
 }

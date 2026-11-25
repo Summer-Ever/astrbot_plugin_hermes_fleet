@@ -284,6 +284,29 @@ class SqliteMessageStore:
                 raise
         return n
 
+    async def list_pending_sessions(
+        self, bot_id: BotId, *, limit: int = 50
+    ) -> list[tuple[SessionId, int, float]]:
+        """按「最久没动静」排出待总结会话。
+
+        走 `idx_msg_unsum(bot_id, session_id, summarized, id)`：过滤条件
+        `summarized=0` 打头，分组键紧随其后，所以这条聚合是索引扫描而不是
+        全表扫。消息表是最大的一张表（百万级），这条查询会被 worker 每轮
+        调用一次，索引形状错了会变成稳定的 CPU 占用。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "select session_id, count(*) as n, max(ts) as last_ts"
+                " from messages where bot_id=? and summarized=0"
+                " group by session_id order by last_ts asc limit ?",
+                (str(bot_id), int(limit)),
+            ).fetchall()
+        return [
+            (SessionId(str(r[0])), int(r[1]), float(r[2] or 0.0))
+            for r in rows
+            if r[0]
+        ]
+
 
 class SqliteIdentityStore:
     """`IdentityStore` 实现。默认行为是「一个 openid 就是一个人」。

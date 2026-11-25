@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
@@ -82,7 +83,9 @@ try:
 except ImportError:  # pragma: no cover
     TextPart = None
 
+from hermes_contracts import ChatMessage, LlmResult  # noqa: E402
 from hermes_fleet import BotRegistry, MemoryService  # noqa: E402
+from hermes_workers import SessionSummarizer, SummaryOutcome  # noqa: E402
 
 PLUGIN_VERSION = "0.1.0"
 
@@ -90,6 +93,101 @@ PLUGIN_VERSION = "0.1.0"
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
 # 45 秒覆盖一次工具循环，又不会让「换个说法再问一遍」持续失忆。
 INJECT_TTL = 45
+
+
+class AstrBotProvider:
+    """把 AstrBot 的对话模型包成 `hermes_contracts.LlmProvider`。
+
+    为什么要包一层，而不是让 worker 直接调 AstrBot：
+    worker 在 `packages/workers` 里，一旦 import astrbot 就再也无法脱离
+    运行环境测试，而它恰恰是最需要测试的一块（输出解析、归属判定）。
+    包一层的代价是这 40 行，收益是那 14 个用例能在任意机器上跑。
+
+    模型选择：配了 `llm_provider_id` 就用指定的那个，否则跟随 AstrBot
+    当前对话模型。**推荐显式指定**——长期记忆的归纳风格不该随主体换模型
+    而静默漂移，事后也没法归因是哪次换模型让记忆变味的。
+    """
+
+    def __init__(self, plugin: "HermesFleet", provider_id: str = "") -> None:
+        self._plugin = plugin
+        self.provider_id = str(provider_id or "").strip()
+
+    def _instance(self):
+        ctx = getattr(self._plugin, "context", None)
+        pid = self.provider_id
+        if pid:
+            try:
+                pm = getattr(ctx, "provider_manager", None)
+                insts = getattr(pm, "inst_map", None) or {}
+                if pid in insts:
+                    return insts[pid]
+            except Exception:
+                pass
+            # 指定的模型还没加载好（热加载/刚改配置）：不静默换模型，
+            # 直接返回 None 让调用方报错。换模型会把 A 模型的产出记在 B 名下。
+            return None
+        try:
+            return ctx.get_using_provider()
+        except Exception:
+            return None
+
+    async def complete(self, messages, *, purpose: str,
+                       max_tokens: int | None = None,
+                       temperature: float | None = None) -> LlmResult:
+        inst = self._instance()
+        if inst is None:
+            raise RuntimeError(
+                "没有可用的对话模型"
+                + (f"（配置的 {self.provider_id} 未加载）" if self.provider_id else "")
+            )
+        # contracts.ChatMessage 只有 role/content，这里拍平成单段 prompt：
+        # AstrBot 的 text_chat 接受一整段文本，我们自己把 system 段放在最前，
+        # 语义等价，且不依赖它的多轮消息格式。
+        prompt = "\n\n".join(
+            f"[{m.role}]\n{m.content}" if m.role != "user" else m.content
+            for m in messages
+        )
+        try:
+            resp = await inst.text_chat(
+                prompt=prompt, session_id=None, request_max_retries=1
+            )
+        except TypeError as exc:
+            # 老版本 provider 不认 request_max_retries。必须压到 1 次重试：
+            # 默认 5 次指数退避会让一次 429 变成一两分钟的静默等待，
+            # 外层只看到「超时」，既认不出是限流也没法换模型。
+            if "request_max_retries" not in str(exc):
+                raise
+            resp = await inst.text_chat(prompt=prompt, session_id=None)
+
+        text = str(getattr(resp, "completion_text", "") or "")
+        model = ""
+        try:
+            model = str(inst.meta().model or "")
+        except Exception:
+            model = self.provider_id
+        return LlmResult(
+            text=text,
+            model=model,
+            finish_reason=_finish_reason(resp),
+            usage={},
+        )
+
+
+def _finish_reason(resp) -> str:
+    """尽量读出「为什么停下」。
+
+    只有拿到 `length` 才能确定输出被截断。AstrBot 各 provider 对外的字段
+    不统一，所以这里三级尝试；全拿不到就返回空——**不猜**。
+    拿不到的后果是截断检测退化，由 `looks_like_complete_array` 兜底。
+    """
+    for attr in ("finish_reason", "stop_reason"):
+        v = getattr(resp, attr, None)
+        if v:
+            return str(v)
+    try:
+        return str(resp.raw_completion.choices[0].finish_reason or "")
+    except Exception:
+        return ""
 
 
 @register(
@@ -115,6 +213,16 @@ class HermesFleet(Star):
             recall_k=int(self._get_cfg("recall_k", 5)),
         )
         self._inject_guard: dict[str, float] = {}
+        self.provider = AstrBotProvider(self, str(self._get_cfg("llm_provider_id", "") or ""))
+        self.summarizer = SessionSummarizer(
+            self.provider,
+            min_messages=int(self._get_cfg("summarize_min_messages", 8)),
+            idle_seconds=float(self._get_cfg("summarize_idle_hours", 6)) * 3600,
+            max_sessions=int(self._get_cfg("summarize_sessions_per_bot", 4)),
+            max_tokens=int(self._get_cfg("summarize_max_tokens", 900)),
+        )
+        self._bg_task: asyncio.Task | None = None
+        self._bot_cursor = 0
 
     # ------------------------------------------------------------ 工具
 
@@ -342,6 +450,20 @@ class HermesFleet(Star):
             "同一个人在群里与私聊是两个值。"
         )
 
+    @fleet.command("总结")
+    async def fleet_summarize(self, event: AstrMessageEvent):
+        """手动跑一轮总结（管理员）。用来验证模型链通不通，不必等 15 分钟。"""
+        if not self._is_admin(event):
+            yield event.plain_result("该命令需要管理员权限。")
+            return
+        yield event.plain_result("开始总结，完成后回报结果……")
+        try:
+            note = await self.summarize_pass()
+        except Exception as exc:
+            yield event.plain_result(f"总结失败：{exc}")
+            return
+        yield event.plain_result(f"总结完成：{note}")
+
     @fleet.command("账号列表")
     async def fleet_bots(self, event: AstrMessageEvent):
         if not self._is_admin(event):
@@ -372,6 +494,68 @@ class HermesFleet(Star):
             f"已删除账号 {target} 的记忆库。" if ok else f"账号 {target} 没有可删除的记忆库。"
         )
 
+    # ------------------------------------------------------------ 后台总结
+
+    async def summarize_pass(self, *, max_bots: int = 25) -> str:
+        """跑一轮总结：轮流处理各账号，每个账号最多几个会话。
+
+        为什么要「轮流」而不是「每轮都从头扫」：100 个账号时，如果每轮都从
+        第一个开始且中途到点退出，后面的账号永远轮不到。游标存在内存里，
+        重启归零——可以接受，因为重启本来就是冷启动，重新从第一个开始也合理。
+
+        为什么单账号失败要吞掉：一个账号的库文件损坏（磁盘满、被外部删了）
+        不该让其余 99 个账号永远停止总结。
+        """
+        if not bool(self._get_cfg("summarize_enabled", True)):
+            return "自动总结已关闭（配置里打开 summarize_enabled 后生效）"
+
+        bots = self.registry.known_bots()
+        if not bots:
+            return "还没有任何账号产生过数据"
+
+        start = self._bot_cursor % len(bots)
+        order = bots[start:] + bots[:start]
+        picked = order[:max(1, max_bots)]
+        self._bot_cursor = (start + len(picked)) % max(1, len(bots))
+
+        total = SummaryOutcome()
+        for pid in picked:
+            try:
+                db = self.registry.get(pid)
+                outcome = await self.summarizer.run_bot(
+                    self.svc.bot_of(pid),
+                    messages=db.messages,
+                    memories=db.memories,
+                    identities=db.identities,
+                )
+            except Exception as exc:
+                logger.error(f"[hermes_fleet] 账号 {pid} 总结失败：{exc}")
+                continue
+            total.add(outcome)
+        return str(total)
+
+    async def _bg_loop(self):
+        """后台循环。间隔可配，默认 15 分钟。
+
+        用 `asyncio.sleep` 而不是 `while True: await work()`：总结是长任务，
+        连续跑会把事件循环占满，反过来拖慢所有账号的对话响应。
+        每轮之间必须真的让出控制权。
+        """
+        interval = max(1.0, float(self._get_cfg("summarize_interval_minutes", 15))) * 60
+        # 启动后先等一会儿：刚重启时所有适配器都在重连，此时抢 CPU 只会
+        # 让连接建立更慢。
+        await asyncio.sleep(min(60.0, interval))
+        while True:
+            try:
+                note = await self.summarize_pass()
+                if "新增记忆" in note or "失败" in note:
+                    logger.info(f"[hermes_fleet] 自动总结：{note}")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error(f"[hermes_fleet] 自动总结异常：\n{traceback.format_exc(limit=5)}")
+            await asyncio.sleep(interval)
+
     # ------------------------------------------------------------ 生命周期
 
     async def initialize(self):
@@ -381,13 +565,24 @@ class HermesFleet(Star):
             f"已有 {len(st['files_on_disk'])} 个账号库，"
             f"最多同时打开 {st['max_open']} 个"
         )
+        if bool(self._get_cfg("summarize_enabled", True)):
+            self._bg_task = asyncio.create_task(self._bg_loop())
+            logger.info("[hermes_fleet] 自动总结已启动")
 
     async def terminate(self):
-        """关停时逐库 checkpoint + 关连接。
+        """关停时先停后台任务，再逐库 checkpoint + 关连接。
 
-        不关的话，最后一次写入可能还留在 `-wal` 里：进程退出后文件句柄
-        释放、数据不会丢，但备份时只拷 `.db` 就会缺最近的记录。
+        顺序不能反：后台任务可能正拿着某个库的连接在写，先关库会让它
+        在 `closed database` 上抛异常；虽然不影响数据（写是事务的），
+        但会糊住真正的关闭错误。
         """
+        if self._bg_task is not None:
+            self._bg_task.cancel()
+            try:
+                await self._bg_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._bg_task = None
         try:
             self.registry.close_all()
         except Exception:
