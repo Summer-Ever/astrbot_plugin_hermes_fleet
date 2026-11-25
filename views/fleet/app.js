@@ -11,7 +11,11 @@
 (function () {
   "use strict";
 
-  const bridge = window.AstrBotPluginView || window.AstrBotPluginPage || null;
+  /* 桥接对象**不能缓存成常量**。
+     AstrBot 把 bridge-sdk.js 注入到 </body> 前，也就是本脚本之后才执行；
+     在这里立刻取一次必然拿到 null，页面就会一直停在「接口不可用」。
+     每次现取，启动时再给它一点加载时间。 */
+  const getBridge = () => window.AstrBotPluginView || window.AstrBotPluginPage || null;
   const $ = (id) => document.getElementById(id);
 
   const state = {
@@ -22,11 +26,13 @@
   // ---------------------------------------------------------------- 基础
 
   function apiGet(path, params) {
+    const bridge = getBridge();
     if (!bridge) return Promise.reject(new Error("no-bridge"));
     return bridge.apiGet(path, params || {});
   }
 
   function apiPost(path, body) {
+    const bridge = getBridge();
     if (!bridge) return Promise.reject(new Error("no-bridge"));
     return bridge.apiPost(path, body || {});
   }
@@ -429,11 +435,40 @@
 
   // ---------------------------------------------------------------- 启动
 
-  function init() {
+  /** 等桥接脚本上线。注入点在 </body> 前，正常情况下 DOMContentLoaded 时
+      已经有了；这里留 1.5s 兜住慢一点的面板版本，超时才算失败。 */
+  function waitBridge(timeoutMs) {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      (function tick() {
+        const b = getBridge();
+        if (b) { resolve(b); return; }
+        if (Date.now() >= deadline) { resolve(null); return; }
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+
+  /** 桥接不可用时说明**具体**原因，别一律说「没从面板打开」——
+      用户明明就是从面板进来的，那句话会把人指到错的方向。 */
+  function showBanner() {
+    const banner = $("banner");
+    const framed = window.parent !== window;
+    banner.textContent = framed
+      ? "面板桥接脚本没有加载成功，接口不可用。请刷新页面；" +
+        "仍然如此请确认插件已启用，并查看面板控制台是否有脚本加载错误。"
+      : "本页需要从 AstrBot WebUI 的插件页进入（现在像是直接打开了页面地址），" +
+        "接口因此不可用。";
+    banner.classList.remove("hidden");
+    $("btn-refresh").disabled = true;
+    $("btn-probe").disabled = true;
+    $("page-info").textContent = "未连接，无法读取账号列表";
+  }
+
+  async function init() {
+    const bridge = await waitBridge(1500);
     if (!bridge) {
-      $("banner").classList.remove("hidden");
-      $("btn-refresh").disabled = true;
-      $("btn-probe").disabled = true;
+      showBanner();
       return;
     }
     bind();

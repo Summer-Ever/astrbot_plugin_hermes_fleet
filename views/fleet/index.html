@@ -114,6 +114,12 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- 不在这里写 bridge-sdk.js：面板会自动把它注入到页面末尾，且 src 里带
+       asset_token（该地址要 token 才放行，手写裸路径会 401）。
+       注入点在 app.js 之后，所以 app.js 里是惰性读取 + 启动时等待。
+       注意：本文件任何位置都不能出现 body 的闭合标签字面量——面板是靠
+       替换第一个闭合标签来插入桥接脚本的，注释里写一次就会把脚本塞进
+       注释内部，桥接永远不执行。 -->
   <script src="./app.js"></script>
 </body>
 </html>
