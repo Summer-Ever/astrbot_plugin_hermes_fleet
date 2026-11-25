@@ -19,7 +19,7 @@
 | 记忆检索 | `modules/recall.py` 880 行 | `hermes_recall` 1006 行（整份搬迁 + v0.3.0 重写排序） | 搬迁 + 重写 |
 | 记忆存储 | `modules/db.py` 2062 行，单库 | `store.py` 474 + `botdb.py` 430，**一 bot 一库** | **重写** |
 | 模型路由 | `modules/router.py` 904 行 | `fallback.py` 380 行 | **重写（本轮补上）** |
-| WebUI | `views/hermes/` 2769 行 + `webapi.py` 959 行 | `views/fleet/` 1 页 + `webapi.py` 4 接口 | **只做第一页** |
+| WebUI | `views/hermes/` 2769 行 + `webapi.py` 959 行（7 tab / 30 接口） | `views/fleet/` 5 文件 + `webapi.py` 17 接口（全局 3 页 + 单账号 4 tab） | **重写（不照搬 tab 结构）** |
 | 技能系统 | `modules/skill_hub.py` 322 行 + 4 个工具 | **无** | 刻意不做 |
 | 热重载 | `hot_reload.py` 155 行 | **无** | 未做 |
 | 后台总结/整理 | 散在 `main.py` 里 | `hermes_workers` 四个模块 + 契约解耦 | **重写** |
@@ -118,9 +118,51 @@
 - `missing`（error）：索引里有账号，库文件不见了。
 - `stale`（warn）：超过 `account_stale_days` 没新数据。
 
-**仍未做**：单账号详情页已能用（抽屉），但「按 platform_id 白名单鉴权」
-没做——现在沿用 AstrBot 的插件级权限。多管理员场景下这是待补的越权面。
-删除账号入口、模型链独立页、批量导出也都没做。
+**v0.5 时的缺口**：单账号详情只有抽屉里的只读展示，没有记忆列表、没有编辑、
+没有删除。也就是说这一页只解决了「知道谁哑了」，没解决「哑了之后怎么办」。
+
+### 已落地：v0.6 把内容管理补回来了
+
+组织方式刻意**不等于** core 的 7 个 tab。百账号下「7 个 tab × N 个账号」是
+双层导航地狱，而且 core 那种「一张表看全部记忆」的页面在 fleet 里要么炸连接数、
+要么跨租户越权。v0.6 分成两层：
+
+    全局层                          单账号下钻页（#/a/<platform_id>）
+    ├─ 账号索引（v0.5）            ├─ 记忆：作用域 → 列表 → 编辑/软删/合并
+    ├─ 模型链（新）                ├─ 常驻：六席可视编辑（按人 + 场景）
+    └─ 设置（新）                  ├─ 未总结：按会话分组，看得见卡在哪
+                                   └─ 操作：立刻总结
+
+接口从 4 个（全只读）扩到 17 个：
+
+| 类别 | 接口 |
+|---|---|
+| 全局 | `overview` `health` `probe` `models` `models/test` `config` `config/save` |
+| 下钻 | `account` `scopes` `memories` `memories/update` `memories/delete` `memories/merge` `resident` `resident/save` `messages` `actions/summarize` |
+
+几个关键取舍：
+
+- **不跨库。** `packages/fleet/admin.py` 的所有函数只接受一个已打开的 db，
+  没有「遍历所有账号」的入口。跨账号动作必须由调用方显式循环，从而继承
+  `probe` 定下的 20 个上限与「用完即关」。
+- **删除是软删，复用 `merged_into` 指向自身**，与 `MemoryService.forget` 同一套
+  语义。物理删除只有 `purge_owner` 一个入口，删除整个账号仍然**没有** UI
+  （它要删一整库用户记忆，得先有导出确认流程）。
+- **搜索限定在当前作用域。** 存储的 `search_candidates` 强制 `can_read`，
+  管理台没有「上帝视角」读法——这正是仍未实现的账号级鉴权缺口。以 owner
+  自己视角查自己的作用域，结果完整且不越权。
+- **合并走存储的 `merge()`**，所以顺手验证了「整理只写 0」那个疑点：
+  手动合并一次，`merged_into` 立刻出现非零值。
+- **模型链直连单个 provider 测**（绕过降级链）：从链上测只能知道「还行/全挂」，
+  分不清是主模型坏了还是兜底在替它干活。
+
+设置页直接渲染 `_conf_schema.json`（21 项，分 5 组 + 其他），写回同一份配置文件。
+`needs_reload` 标出「改了要重载插件才生效」的项——除了 `memory_injection`、
+`capture_messages`、`account_stale_days`，其余都在 `__init__` 里读一次就固化。
+
+**仍未做**：按 `platform_id` 白名单鉴权（多管理员下是越权面）、删除整个账号、
+批量导出、技能系统。
+
 
 ---
 

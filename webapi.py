@@ -7,11 +7,19 @@ HTTP 解析混在一起，结果是「页面显示错了」只能在装了 AstrB
 前端见 `views/fleet/`，用法与 core 一致：`window.AstrBotPluginView.apiGet(path)`
 里的 path 是相对本插件前缀的（如 `overview`）。
 
-## 这一版是只读的
+## 只读版之后：下钻页与全局页
 
-账号盘点、详情、批量探测、健康 —— 都不写。删除账号（purge）刻意没做：
-它要删一整库用户记忆，必须有「先导出确认 + 二次输入 platform_id」的完整
-流程，草率的删除按钮在百账号运维里是灾难入口。等只读版跑顺了再做。
+v0.5 只有 4 个只读接口（账号盘点）。v0.6 把 hermes_core 那种「内容管理」
+补回来了，但换了组织方式：不是「7 个 tab 对着所有数据」，而是
+
+    全局层（账号索引 / 模型链 / 设置）  →  单账号下钻页（记忆 / 常驻 / 消息 / 操作）
+
+原因在 `docs/07`：100 个账号下，core 那种「一张表看全部记忆」的页面
+要么炸连接数，要么变成跨租户越权。下钻页只开**一个**库，天然不越界。
+
+仍然刻意没做的：**删除整个账号**。它要删掉一整库用户记忆，必须有
+「先导出确认 + 二次输入 platform_id」的流程，草率的删除按钮在百账号
+运维里是灾难入口。单条记忆删除是软删（`merged_into` 指自身），可回滚。
 """
 
 from __future__ import annotations
@@ -46,6 +54,34 @@ class FleetWebAPI:
              "单账号详情：常驻六席与记忆统计"),
             (f"{self.prefix}/probe", self.probe, ["POST"],
              "批量取真实统计（有上限，用完立即关库）"),
+            # ---- 下钻页：进去之后才是 hermes_core 那种内容管理 ----
+            (f"{self.prefix}/scopes", self.scopes, ["GET"],
+             "该账号下的记忆作用域清单（谁、哪个群、各多少条）"),
+            (f"{self.prefix}/memories", self.memories, ["GET"],
+             "作用域内翻页或检索记忆"),
+            (f"{self.prefix}/memories/update", self.memory_update, ["POST"],
+             "整条改一条记忆"),
+            (f"{self.prefix}/memories/delete", self.memory_delete, ["POST"],
+             "软删若干条（可回滚，不物理删除）"),
+            (f"{self.prefix}/memories/merge", self.memory_merge, ["POST"],
+             "把几条并成一条（来源软删）"),
+            (f"{self.prefix}/resident", self.resident, ["GET"],
+             "某用户某场景的六个常驻词条"),
+            (f"{self.prefix}/resident/save", self.resident_save, ["POST"],
+             "整段覆盖一个常驻词条"),
+            (f"{self.prefix}/messages", self.messages, ["GET"],
+             "未总结消息，按会话分组"),
+            (f"{self.prefix}/actions/summarize", self.action_summarize, ["POST"],
+             "立刻对该账号跑一轮总结"),
+            # ---- 全局：模型链与设置 ----
+            (f"{self.prefix}/models", self.models, ["GET"],
+             "降级链、累计计数、最近调用日志"),
+            (f"{self.prefix}/models/test", self.models_test, ["POST"],
+             "逐个模型发一次最小请求，测连通性"),
+            (f"{self.prefix}/config", self.config_get, ["GET"],
+             "插件配置（分组 + schema）"),
+            (f"{self.prefix}/config/save", self.config_save, ["POST"],
+             "保存插件配置"),
         ]
         for route, handler, methods, desc in routes:
             try:
@@ -177,8 +213,20 @@ class FleetWebAPI:
         except Exception:
             logger.warning(f"[hermes_fleet] 读取账号 {pid} 常驻词条失败:\n{_tb()}")
 
+        # 库文件名从索引里取（`accounts()` 只做 listdir，不打开库）。
+        # 下钻页标题下面要显示它——排查「这个账号对应哪个文件」时最省事。
+        file_name = ""
+        try:
+            for row in self.plugin.registry.accounts():
+                if row.get("platform_id") == pid:
+                    file_name = str(row.get("file") or "")
+                    break
+        except Exception:
+            pass
+
         return json_response({
             "platform_id": pid,
+            "file": file_name,
             "stats": stats,
             "resident": resident,
             "resident_hint": "常驻按「私聊」场景读取；群场景的常驻各自独立，"
@@ -202,6 +250,392 @@ class FleetWebAPI:
             "items": merge_probe([{"platform_id": p} for p in clean], probed),
             "count": len(probed),
         })
+
+    # ------------------------------------------------------------------ 下钻
+
+    def _db_of(self, pid: str):
+        """打开一个**已存在**的账号库，返回 `(db, 错误响应)`。
+
+        先查索引再 `get()`：`registry.get()` 对不认识的 id 会凭空建一个空库
+        文件。页面上看起来「这个账号是空的」，磁盘上已经多了一个永远是空的
+        库——之后它还会以「孤立库」告警出现在列表里，变成自造的噪声。
+        """
+        if not pid:
+            return None, self._fail("缺少 platform_id")
+        if not self.plugin.registry.has_account(pid):
+            return None, self._fail("该账号不在索引里", 404)
+        return self.plugin.registry.get(pid), None
+
+    async def scopes(self):
+        """该账号的记忆作用域清单。下钻页左栏的全部数据来源。"""
+        from hermes_fleet import admin
+
+        pid = str(request.query.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        bot = self.plugin.svc.bot_of(pid)
+        return json_response({
+            "platform_id": pid,
+            "scopes": await admin.list_scopes(db, bot),
+            "stats": db.stats(),
+        })
+
+    async def memories(self):
+        """作用域内翻页 / 检索。
+
+        `q` 非空走存储的 `search_candidates`（库内 FTS），为空走游标分页。
+        两条路的返回形状一致，前端不用分支。
+        """
+        from hermes_fleet import admin
+
+        pid = str(request.query.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+
+        bot = self.plugin.svc.bot_of(pid)
+        try:
+            catalog = admin.key_of(
+                bot,
+                scope=str(request.query.get("scope") or "user"),
+                owner_id=str(request.query.get("owner_id") or ""),
+                group_id=str(request.query.get("group_id") or ""),
+            )
+        except ValueError as exc:
+            return self._fail(f"作用域参数不成立：{exc}")
+
+        limit = _q_int("limit", 50)
+        after_id = _q_int("after_id", 0)
+        q = str(request.query.get("q") or "").strip()
+        try:
+            if q:
+                items = await admin.search_memories(db, catalog, query=q, limit=limit)
+            else:
+                items = await admin.page_memories(db, catalog, limit=limit, after_id=after_id)
+        except Exception:
+            logger.error(f"[hermes_fleet] 读取 {pid} 记忆失败:\n{_tb()}")
+            return self._fail("读取记忆失败，详见插件日志", 500)
+
+        return json_response({
+            "items": items,
+            "count": len(items),
+            # 前端用「这一页满了就当还有下一页」，不额外查 count(*)——
+            # 记忆表可能几十万行，为了一个分页计数全表扫不值得。
+            "next_after_id": items[-1]["id"] if items else 0,
+            "has_more": len(items) >= max(1, min(200, limit)),
+            "searched": bool(q),
+        })
+
+    async def memory_update(self):
+        from hermes_fleet import admin
+
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        try:
+            memory_id = int(body.get("id"))
+        except (TypeError, ValueError):
+            return self._fail("缺少有效的 id")
+
+        try:
+            row = await admin.edit_memory(
+                db, self.plugin.svc.bot_of(pid), memory_id,
+                content=body.get("content"),
+                kind=body.get("kind"),
+                visibility=body.get("visibility"),
+            )
+        except KeyError:
+            return self._fail("这条记忆不存在", 404)
+        except ValueError as exc:
+            return self._fail(str(exc))
+        except Exception:
+            logger.error(f"[hermes_fleet] 修改 {pid} 记忆失败:\n{_tb()}")
+            return self._fail("写入失败，详见插件日志", 500)
+        return json_response({"item": row})
+
+    async def memory_delete(self):
+        from hermes_fleet import admin
+
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return self._fail("ids 必须是非空数组")
+        if len(ids) > 200:
+            return self._fail("一次最多删 200 条")
+        try:
+            n = await admin.forget_memories(db, self.plugin.svc.bot_of(pid), ids)
+        except Exception:
+            logger.error(f"[hermes_fleet] 删除 {pid} 记忆失败:\n{_tb()}")
+            return self._fail("写入失败，详见插件日志", 500)
+        return json_response({"deleted": n, "note": "软删：可回滚，不会物理消失"})
+
+    async def memory_merge(self):
+        from hermes_fleet import admin
+
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        sources = body.get("source_ids")
+        if not isinstance(sources, list):
+            return self._fail("source_ids 必须是数组")
+        try:
+            into_id = int(body.get("into_id"))
+        except (TypeError, ValueError):
+            return self._fail("缺少有效的 into_id")
+        try:
+            n = await admin.merge_memories(
+                db, self.plugin.svc.bot_of(pid), sources, into_id)
+        except KeyError:
+            return self._fail("合并目标不存在", 404)
+        except ValueError as exc:
+            return self._fail(str(exc))
+        except Exception:
+            logger.error(f"[hermes_fleet] 合并 {pid} 记忆失败:\n{_tb()}")
+            return self._fail("写入失败，详见插件日志", 500)
+        return json_response({"merged": n})
+
+    async def resident(self):
+        """某用户某场景的六个常驻词条。
+
+        下钻页的常驻 tab 要能切换「私聊 / 某群」，所以必须按 owner+scope 取；
+        `account` 接口只返回私聊那一套（它服务的是列表页的快速预览）。
+        """
+        from hermes_fleet import admin
+
+        pid = str(request.query.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        owner_id = str(request.query.get("owner_id") or "").strip()
+        if not owner_id:
+            return self._fail("缺少 owner_id")
+        scope = str(request.query.get("scope") or "private").strip()
+        try:
+            values = await admin.resident_of(
+                db, self.plugin.svc.bot_of(pid), owner_id, scope)
+        except ValueError as exc:
+            return self._fail(f"场景参数不成立：{exc}")
+        return json_response({
+            "platform_id": pid, "owner_id": owner_id, "scope": scope,
+            "resident": values,
+        })
+
+    async def resident_save(self):
+        from hermes_fleet import admin
+
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        owner_id = str(body.get("owner_id") or "").strip()
+        if not owner_id:
+            return self._fail("缺少 owner_id")
+        try:
+            row = await admin.save_resident(
+                db, self.plugin.svc.bot_of(pid), owner_id,
+                str(body.get("scope") or "private"),
+                str(body.get("block") or ""),
+                str(body.get("text") or ""),
+            )
+        except ValueError as exc:
+            return self._fail(str(exc))
+        except Exception:
+            logger.error(f"[hermes_fleet] 保存 {pid} 常驻失败:\n{_tb()}")
+            return self._fail("写入失败，详见插件日志", 500)
+        return json_response({"item": row})
+
+    async def messages(self):
+        from hermes_fleet import admin
+
+        pid = str(request.query.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        view = await admin.pending_messages(
+            db, self.plugin.svc.bot_of(pid), limit=_q_int("limit", 50))
+        view["platform_id"] = pid
+        return json_response(view)
+
+    async def action_summarize(self):
+        """对该账号立刻跑一轮总结。
+
+        这是「看得到问题之后能立刻动手」的那一步：静默账号的真正原因常常是
+        消息攒着没被总结，等后台循环可能要 15 分钟。
+        """
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        bot = self.plugin.svc.bot_of(pid)
+        try:
+            outcome = await self.plugin.summarizer.run_bot(
+                bot, messages=db.messages, memories=db.memories,
+                identities=db.identities,
+            )
+        except Exception:
+            logger.error(f"[hermes_fleet] 账号 {pid} 手动总结失败:\n{_tb()}")
+            return self._fail("总结失败，详见插件日志", 500)
+        return json_response({
+            "result": str(outcome),
+            "memories": int(getattr(outcome, "memories", 0) or 0),
+            "messages": int(getattr(outcome, "messages", 0) or 0),
+            "failures": int(getattr(outcome, "failures", 0) or 0),
+        })
+
+    # ------------------------------------------------------------------ 模型
+
+    async def models(self):
+        """降级链 + 累计计数 + 最近调用日志。
+
+        `FallbackProvider.log` 是内存里的环形缓冲（64 条），重启即清空——
+        这是刻意的：模型故障是「当下能不能干活」的问题，把历史日志落盘
+        只会让人对着三天前的限流记录做决策。
+        """
+        provider = getattr(self.plugin, "provider", None)
+        if provider is None:
+            return self._fail("模型链未初始化", 500)
+        stats = getattr(provider, "stats", None)
+        log = []
+        for item in list(getattr(provider, "log", []) or [])[-40:]:
+            log.append({
+                "ts": float(getattr(item, "ts", 0) or 0),
+                "provider": str(getattr(item, "provider", "")),
+                "purpose": str(getattr(item, "purpose", "")),
+                "ok": bool(getattr(item, "ok", False)),
+                "kind": str(getattr(item, "kind", "")),
+                "latency_ms": round(float(getattr(item, "latency_ms", 0) or 0), 1),
+                "detail": str(getattr(item, "detail", ""))[:300],
+            })
+        return json_response({
+            "chain": provider.chain(),
+            "summary": provider.summary(),
+            "stats": {
+                "calls": int(getattr(stats, "calls", 0) or 0),
+                "failures": int(getattr(stats, "failures", 0) or 0),
+                "by_provider": dict(getattr(stats, "by_provider", {}) or {}),
+                "by_kind": dict(getattr(stats, "by_kind", {}) or {}),
+            },
+            "log": log,
+        })
+
+    async def models_test(self):
+        """逐个模型发一句最小请求。
+
+        **绕过降级链直连单个 provider**：从链上测只能知道「还行/全挂了」，
+        分不清是主模型坏了还是兜底模型在替它干活——而这正是这里要回答的。
+
+        有代价（真花配额、真有延迟），所以限 3 个且必须由用户点击触发。
+        """
+        from hermes_contracts import ChatMessage
+
+        body = await self._body()
+        wanted = body.get("ids")
+        try:
+            chain = dict(self.plugin._provider_chain())
+        except Exception:
+            logger.error(f"[hermes_fleet] 读取模型链失败:\n{_tb()}")
+            return self._fail("读取模型链失败", 500)
+        names = [str(x) for x in wanted] if isinstance(wanted, list) and wanted else list(chain)
+        names = names[:3]
+
+        out = []
+        for name in names:
+            impl = chain.get(name)
+            if impl is None:
+                out.append({"name": name, "ok": False, "error": "未加载"})
+                continue
+            t0 = time.perf_counter()
+            try:
+                res = await impl.complete(
+                    [ChatMessage(role="user", content="回复 ok 两个字母即可")],
+                    purpose="test", max_tokens=16, temperature=0.0,
+                )
+                out.append({
+                    "name": name, "ok": True,
+                    "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "model": getattr(res, "model", "") or "",
+                    "reply": (getattr(res, "text", "") or "")[:40],
+                })
+            except Exception as exc:  # noqa: BLE001 — 测试接口要把失败原因原样带回
+                out.append({
+                    "name": name, "ok": False,
+                    "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                })
+        return json_response({"items": out})
+
+    # ------------------------------------------------------------------ 设置
+
+    def _schema(self) -> dict:
+        import json
+        import os
+
+        if not hasattr(self, "_schema_cache"):
+            path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "_conf_schema.json")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                self._schema_cache = data if isinstance(data, dict) else {}
+            except Exception:
+                logger.warning(f"[hermes_fleet] 读取配置 schema 失败:\n{_tb()}")
+                self._schema_cache = {}
+        return self._schema_cache
+
+    async def config_get(self):
+        from hermes_fleet.settings import schema_groups
+
+        if self.plugin.config is None:
+            return self._fail("插件没有拿到配置对象", 500)
+        try:
+            values = dict(self.plugin.config)
+        except Exception:
+            values = {}
+        return json_response({
+            "groups": schema_groups(self._schema(), values),
+            "values": values,
+        })
+
+    async def config_save(self):
+        from hermes_fleet.settings import NEEDS_RELOAD, clean_values
+
+        body = await self._body()
+        values = body.get("values")
+        if not isinstance(values, dict) or not values:
+            return self._fail("没有要保存的配置")
+        cleaned, errors = clean_values(self._schema(), values)
+        if errors:
+            return self._fail("；".join(errors))
+        try:
+            self.plugin.config.update(cleaned)
+            await self.plugin.config.save_config_async()
+        except Exception:
+            logger.error(f"[hermes_fleet] 保存配置失败:\n{_tb()}")
+            return self._fail("写入配置文件失败，请查看后端日志", 500)
+        return json_response({
+            "saved": sorted(cleaned),
+            "needs_reload": sorted(k for k in cleaned if k in NEEDS_RELOAD),
+        })
+
+
+def _q_int(name: str, default: int) -> int:
+    """取整数查询参数。非法值退回默认而不是报错：
+    分页参数错了应该给一页数据，而不是让整页空白。"""
+    try:
+        return int(request.query.get(name) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _tb() -> str:

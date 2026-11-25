@@ -17,24 +17,20 @@
         </div>
       </div>
 
+      <nav class="nav" id="nav">
+        <a href="#/" data-nav="accounts"><span class="dot"></span>账号台</a>
+        <a href="#/models" data-nav="models"><span class="dot"></span>模型链</a>
+        <a href="#/settings" data-nav="settings"><span class="dot"></span>设置</a>
+      </nav>
+
       <div class="side-block">
-        <div class="side-title">容量</div>
+        <div class="side-title">全局</div>
         <div class="line"><span>账号</span><b id="s-accounts">—</b></div>
         <div class="line"><span>磁盘占用</span><b id="s-bytes">—</b></div>
         <div class="line"><span>连接占用</span><b id="s-open" title="已打开 / 上限。到顶后每次访问新账号都要驱逐一个旧连接">—</b></div>
-      </div>
-
-      <div class="side-block">
-        <div class="side-title">异常</div>
         <div class="line"><span>静默</span><b id="s-stale">—</b></div>
         <div class="line"><span>孤立库</span><b id="s-orphan" title="磁盘上有库文件，但索引里没有对应账号">—</b></div>
         <div class="line"><span>丢失库</span><b id="s-missing" title="索引里有账号，但库文件不见了">—</b></div>
-      </div>
-
-      <div class="side-block" id="model-block">
-        <div class="side-title">模型链</div>
-        <div class="model-line" id="m-chain">—</div>
-        <div class="model-line dim" id="m-fail">—</div>
       </div>
 
       <div class="side-foot">
@@ -45,81 +41,222 @@
 
     <main class="main">
       <div id="banner" class="banner hidden">
-        当前页面没有连上 AstrBot 面板，接口不可用。请从 AstrBot WebUI 的插件页面入口打开。
+        本页需要从 AstrBot WebUI 的插件页进入，直接访问时接口不可用。
       </div>
 
-      <header class="topbar">
-        <div>
-          <h1>账号索引</h1>
-          <p>哪个账号已经停止记记忆了——这一页不打开任何数据库连接</p>
-        </div>
-        <div class="top-actions">
-          <button class="btn ghost" id="btn-health">健康</button>
-          <button class="btn primary" id="btn-refresh">刷新</button>
-        </div>
-      </header>
+      <!-- ---------------------------------------------------------- 账号台 -->
+      <section class="view" id="view-accounts">
+        <header class="topbar">
+          <div>
+            <h1>账号索引</h1>
+            <p>哪个账号已经停止记记忆了——这一页不打开任何数据库连接</p>
+          </div>
+          <div class="top-actions">
+            <button class="btn ghost" id="btn-health">健康</button>
+            <button class="btn primary" id="btn-refresh">刷新</button>
+          </div>
+        </header>
 
-      <section class="alerts" id="alerts"></section>
+        <section class="alerts" id="alerts"></section>
 
-      <section class="toolbar">
-        <input class="input grow" id="q" type="search" placeholder="按账号 ID 或文件名搜索" />
-        <select class="input" id="sort">
-          <option value="recent">最近写入</option>
-          <option value="size">占用最大</option>
-          <option value="name">按名称</option>
-        </select>
-        <button class="btn" id="btn-probe" title="对当前页的账号逐个打开取真实统计，用完立即关库">
-          取统计
-        </button>
+        <section class="toolbar">
+          <input class="input grow" id="q" type="search" placeholder="按账号 ID 或文件名搜索" />
+          <select class="input" id="sort">
+            <option value="recent">最近写入</option>
+            <option value="size">占用最大</option>
+            <option value="name">按名称</option>
+          </select>
+          <button class="btn" id="btn-probe" title="对当前页的账号逐个打开取真实统计，用完立即关库">
+            取统计
+          </button>
+        </section>
+
+        <section class="panel">
+          <table class="table">
+            <thead>
+              <tr>
+                <th class="w-40p">账号</th>
+                <th class="w-90">占用</th>
+                <th class="w-130">最后写入</th>
+                <th class="w-80">记忆</th>
+                <th class="w-80">未总结</th>
+                <th class="w-110">状态</th>
+                <th class="w-60"></th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+          <div class="empty hidden" id="empty">还没有任何账号库文件。</div>
+        </section>
+
+        <footer class="pager">
+          <span id="page-info">—</span>
+          <div class="pager-btns">
+            <button class="btn ghost" id="prev">上一页</button>
+            <button class="btn ghost" id="next">下一页</button>
+          </div>
+        </footer>
       </section>
 
-      <section class="panel">
-        <table class="table">
-          <thead>
-            <tr>
-              <th class="w-40p">账号</th>
-              <th class="w-90">占用</th>
-              <th class="w-130">最后写入</th>
-              <th class="w-90">记忆</th>
-              <th class="w-90">未总结</th>
-              <th class="w-110">状态</th>
-            </tr>
-          </thead>
-          <tbody id="tbody"></tbody>
-        </table>
-        <div class="empty hidden" id="empty">还没有任何账号库文件。</div>
+      <!-- ---------------------------------------------------------- 下钻页 -->
+      <section class="view hidden" id="view-detail">
+        <header class="crumbs">
+          <a href="#/" class="back">← 账号索引</a>
+          <span class="sep">/</span>
+          <span class="mono" id="d-pid">—</span>
+        </header>
+
+        <header class="detail-head">
+          <div>
+            <h1 id="d-title" class="mono">—</h1>
+            <p class="dim mono" id="d-file">—</p>
+          </div>
+          <div class="kpis" id="d-kpis"></div>
+        </header>
+
+        <nav class="tabs" id="d-tabs">
+          <button class="tab active" data-tab="memories">记忆</button>
+          <button class="tab" data-tab="resident">常驻</button>
+          <button class="tab" data-tab="messages">未总结</button>
+          <button class="tab" data-tab="actions">操作</button>
+        </nav>
+
+        <!-- 记忆 -->
+        <div class="tab-pane" id="pane-memories">
+          <div class="split">
+            <aside class="scopes">
+              <div class="pane-head">
+                <span>作用域</span>
+                <button class="btn tiny ghost" id="btn-scopes">刷新</button>
+              </div>
+              <div id="scope-list" class="scope-list"></div>
+            </aside>
+            <div class="mem-main">
+              <div class="toolbar">
+                <input class="input grow" id="mem-q" type="search" placeholder="在该作用域内搜索…" />
+                <button class="btn ghost" id="mem-clear">清空</button>
+                <button class="btn" id="mem-selall">全选本页</button>
+                <button class="btn" id="mem-merge" disabled>合并选中</button>
+                <button class="btn danger" id="mem-del" disabled>删除选中</button>
+              </div>
+              <div id="mem-list" class="mem-list"></div>
+              <div class="pager">
+                <span id="mem-info">—</span>
+                <button class="btn ghost" id="mem-more">加载更多</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 常驻 -->
+        <div class="tab-pane hidden" id="pane-resident">
+          <div class="toolbar">
+            <select class="input" id="res-owner"></select>
+            <select class="input" id="res-scope"></select>
+            <button class="btn ghost" id="btn-res-load">读取</button>
+            <span class="hint" id="res-hint">常驻按「人 + 场景」隔离，六个槽位整段覆盖</span>
+          </div>
+          <div class="res-grid" id="res-grid"></div>
+          <div class="toolbar right">
+            <button class="btn primary" id="btn-res-save">保存全部改动</button>
+          </div>
+        </div>
+
+        <!-- 消息 -->
+        <div class="tab-pane hidden" id="pane-messages">
+          <div class="toolbar">
+            <span class="hint" id="msg-hint">—</span>
+            <button class="btn ghost" id="btn-msg">刷新</button>
+          </div>
+          <div id="msg-list" class="msg-list"></div>
+        </div>
+
+        <!-- 操作 -->
+        <div class="tab-pane hidden" id="pane-actions">
+          <div class="cards">
+            <div class="card">
+              <h3>立刻总结</h3>
+              <p>把该账号攒下的消息跑一轮总结，不必等后台 15 分钟一轮。</p>
+              <button class="btn primary" id="btn-summarize">开始总结</button>
+              <div class="result" id="summarize-result"></div>
+            </div>
+            <div class="card">
+              <h3>账号信息</h3>
+              <dl class="kv" id="d-info"></dl>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <footer class="pager">
-        <span id="page-info">—</span>
-        <div class="pager-btns">
-          <button class="btn ghost" id="prev">上一页</button>
-          <button class="btn ghost" id="next">下一页</button>
+      <!-- ---------------------------------------------------------- 模型链 -->
+      <section class="view hidden" id="view-models">
+        <header class="topbar">
+          <div>
+            <h1>模型链</h1>
+            <p>主模型 → 降级 1 → 降级 2 …：谁先上、谁在冷却、最近有没有失手</p>
+          </div>
+          <div class="top-actions">
+            <button class="btn" id="btn-model-test">逐个测连通</button>
+            <button class="btn primary" id="btn-model-refresh">刷新</button>
+          </div>
+        </header>
+        <section class="panel pad">
+          <div class="chain" id="model-chain"></div>
+          <div class="hint" id="model-summary">—</div>
+          <div class="test-result" id="model-test-result"></div>
+        </section>
+        <section class="panel pad">
+          <h2 class="pane-title">累计计数</h2>
+          <div class="kpis" id="model-stats"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="pane-title">最近调用</h2>
+            <span class="hint">内存环形缓冲，重启清空；只保留最近 64 条</span>
+          </div>
+          <table class="table">
+            <thead>
+              <tr>
+                <th class="w-90">时间</th>
+                <th class="w-40p">模型</th>
+                <th class="w-80">用途</th>
+                <th class="w-70">结果</th>
+                <th class="num w-70">耗时</th>
+                <th>备注</th>
+              </tr>
+            </thead>
+            <tbody id="model-log"></tbody>
+          </table>
+          <div class="empty hidden" id="model-log-empty">还没有调用记录。</div>
+        </section>
+      </section>
+
+      <!-- ---------------------------------------------------------- 设置 -->
+      <section class="view hidden" id="view-settings">
+        <header class="topbar">
+          <div>
+            <h1>设置</h1>
+            <p>与 AstrBot 插件配置页同一份文件；标「需重启」的项保存后要重载插件</p>
+          </div>
+          <div class="top-actions">
+            <button class="btn primary" id="btn-cfg-save">保存</button>
+          </div>
+        </header>
+        <div id="cfg-groups"></div>
+        <div class="toolbar right">
+          <button class="btn primary" id="btn-cfg-save2">保存</button>
         </div>
-      </footer>
+      </section>
     </main>
   </div>
 
-  <div class="drawer-mask hidden" id="mask"></div>
-  <aside class="drawer hidden" id="drawer">
-    <header class="drawer-head">
-      <div>
-        <h2 id="d-title">—</h2>
-        <p id="d-sub">—</p>
-      </div>
-      <button class="btn ghost" id="d-close">关闭</button>
-    </header>
-    <div class="drawer-body" id="d-body"></div>
-  </aside>
-
   <div class="toast" id="toast"></div>
 
-  <!-- 不在这里写 bridge-sdk.js：面板会自动把它注入到页面末尾，且 src 里带
-       asset_token（该地址要 token 才放行，手写裸路径会 401）。
-       注入点在 app.js 之后，所以 app.js 里是惰性读取 + 启动时等待。
-       注意：本文件任何位置都不能出现 body 的闭合标签字面量——面板是靠
-       替换第一个闭合标签来插入桥接脚本的，注释里写一次就会把脚本塞进
-       注释内部，桥接永远不执行。 -->
+  <!-- 桥接脚本由面板注入到页面末尾（本脚本之后），
+       app.js 里是惰性读取 + 启动时等待，不依赖加载顺序。 -->
   <script src="./app.js"></script>
+  <script src="./detail.js"></script>
+  <script src="./models.js"></script>
+  <script src="./settings.js"></script>
 </body>
 </html>
