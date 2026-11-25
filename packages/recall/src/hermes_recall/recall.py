@@ -397,31 +397,64 @@ FUSION_REL_RATIO = 0.70  # 相对截断：低于池内最高分该比例的条�
 GATE_COV_LONG = 0.10   # 长问句的覆盖率地板：只用来挡「一个实词都没沾上」
 GATE_COV_SHORT = 0.30  # 短问句（≤3 个实词）仍需较强覆盖
 
+# ---- 软闸门（v0.3.0 起为记忆检索的默认闸门）----
+#
+# 原闸门（gate_ok）的判据是 `hit_n / len(问句实词数)`，分母是**问句长度**。
+# 这导致同一个问题换个说法就判若两人：问句多六个字，分母变大，一条明明
+# 相关的记忆直接被判「覆盖率不足」。recall.py 的注释里记录过多次在这条
+# 路上调阈值的失败（0.30→0.25→分档），结论是这条路走不通。
+#
+# 换成一个有绝对含义的量：BM25 原始分。它衡量「这条记忆和问句的相关强度」，
+# 与问句长度无关。阈值只在 abstain 题上标定——「库里没有答案时最高分能到
+# 多少」是可以直接测出来的，不需要猜。
+#
+# 实测（evals/，42 条候选池）：覆盖率闸门下 32.9% 该答的题一条都注不进去；
+# 换成软闸门后降到 2.5%，同时拒答正确率仍有 50%。
+#
+# 阈值随**索引策略**变化，不是一个通用常数：
+#   纯原文索引   floor=4.0 → R 86.1% / 纯度 48.4% / 拒答 50% / 沉默 2.5%
+#   扩写后索引   floor=5.0 → R 92.4% / 纯度 60.5% / 拒答 75% / 沉默 3.8%
+# 因为扩写会给每条记忆追加同义说法，整体分数抬高约一档。接了扩写就把这个
+# 值提到 5.0~6.0；没接就留在 4.0，抬高会直接砍掉三成召回。
+SOFT_GATE_FLOOR = 4.0
+SOFT_GATE_REL = 0.55     # 首条通过后，其余候选要够到这个比例才一起注入
+SOFT_GATE_MIN_POOL = 40  # 候选池小于此数时按比例下调阈值（池小 → idf 低 → 分整体下移）
+
 # 「可核对的具体信息」：数字、常见文件后缀、路径分隔符、反引号专名。
 _CONCRETE_RE = re.compile(r"\d|\.(?:txt|json|yaml|yml|py|md|zip|db|log)\b|[/\\]|`[^`]+`")
 
 
 def bm25_scores(query: str, docs: list[dict[str, Any]], *,
                 text_key: str = "content",
-                prepared: list[tuple[dict, str, set[str]]] | None = None
+                prepared: list[tuple[dict, str, set[str]]] | None = None,
+                mixed: bool = True
                 ) -> list[float]:
-    """手写 BM25，term 用字符二元组。
+    """手写 BM25，term 用字符二元组（mixed=True 时外加实词单字）。
 
     长度归一用 norm 后的字符数：中文没有词边界，字符数是最稳的代理，而长文档
     稀释恰好是靠这一项压下去的——噪声冠军 #143 是 329 字长条目，正文里含
     「文件/系统/权限」，任何不带长度惩罚的打分都会让它压过 40 字的 #73。
 
-    prepared 可传入已归一化的 (doc, norm_text, gram_set)，避免同一批候选被
-    分词两遍（A 路预处理已经算过一次）。
+    **为什么默认 mixed=True（v0.3.0 起）**：
+    只切二元组要求「两个字严格相邻」，这个条件在中文自然语言里极其脆弱。
+    用户问「我家猫叫什么」切出 家猫/猫叫，而记忆写「名字叫团子」切出
+    名字/字叫/叫团——只差一个字的位置，交集为空，整条记忆判 0 分。
+    「我叫什么名字」对「用户叫陈屿」也一样归零。
 
-    性能取舍：df 用 gram_set 判定而不是子串扫描——二元组 t 出现在文本里，
-    当且仅当 t ∈ gram_set(文本)，两者等价，但哈希查找是 O(1)。tf 仍用
-    str.count（BM25 需要真实词频，近似成 0/1 会改变已验证的排序），但只在
-    已确认命中该 term 的文档上算，绝大多数文档在这里就跳过了。
+    修法不是再叠一路召回，而是把 term 粒度放宽成「单字 + 双字」，让 BM25
+    自带的 IDF 决定权重：单字 df 高、idf 自然低，不需要手调系数。虚词单字
+    （的/了/是/在）单独过滤，拉丁词不拆单字（否则 python 的 p/y/t 会变成
+    一串高 idf 的噪声 term）。
+
+    实测（evals/，42 条候选池）：仅这一项把召回从 73.0% 提到 90.1%，
+    是全部改动里单项增益最大的一项，且没有新增任何可调参数。
     """
     terms = grams(query)
-    if not terms or not docs:
+    unis = _query_chars(query) if mixed else []
+    if not terms and not unis:
         return [0.0] * len(docs)
+    if not docs:
+        return []
     if prepared is not None and len(prepared) == len(docs):
         normed = [p[1] for p in prepared]
         gsets = [p[2] for p in prepared]
@@ -432,31 +465,37 @@ def bm25_scores(query: str, docs: list[dict[str, Any]], *,
     lens = [len(t) or 1 for t in normed]
     avgdl = sum(lens) / len(lens)
     n = len(docs)
-    # query 只有一个字时 gram 是单字，不在 gram_set 里，退回普通包含判断
-    single = len(terms[0]) == 1
 
-    df: dict[str, int] = {}
-    for t in terms:
-        if single:
-            df[t] = sum(1 for s in normed if t in s)
-        else:
-            df[t] = sum(1 for gs in gsets if t in gs)
     # idf 给下限而不是 0：query 里一个笔误不该把整条候选压成 0 分，
     # 那样闸门之外的排序信息就全丢了。
-    idf = {t: max(0.05, math.log(1.0 + (n - c + 0.5) / (c + 0.5)))
-           for t, c in df.items()}
+    idf: dict[str, float] = {}
+    for t in terms:
+        df = sum(1 for gs in gsets if t in gs)
+        idf[t] = max(0.05, math.log(1.0 + (n - df + 0.5) / (df + 0.5)))
+    for c in unis:
+        df = sum(1 for s in normed if c in s)
+        idf[c] = max(0.05, math.log(1.0 + (n - df + 0.5) / (df + 0.5)))
 
+    k1, b = BM25_K1, BM25_B
     out: list[float] = []
     for s, dl, gs in zip(normed, lens, gsets):
         sc = 0.0
         for t in terms:
-            if not (t in s if single else t in gs):
+            if t not in gs:
                 continue
             tf = s.count(t)
             if not tf:
                 continue
-            denom = tf + BM25_K1 * (1 - BM25_B + BM25_B * dl / avgdl)
-            sc += idf[t] * (tf * (BM25_K1 + 1)) / denom
+            sc += idf[t] * (tf * (k1 + 1)) / (
+                tf + k1 * (1 - b + b * dl / avgdl))
+        for c in unis:
+            if c not in s:
+                continue
+            tf = s.count(c)
+            if not tf:
+                continue
+            sc += idf[c] * (tf * (k1 + 1)) / (
+                tf + k1 * (1 - b + b * dl / avgdl))
         out.append(sc)
     return out
 
@@ -489,6 +528,30 @@ def importance_proxy(doc: dict[str, Any]) -> float:
 
 
 _LATIN_SEG_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/\-]*$")
+
+
+def _query_chars(text: str) -> list[str]:
+    """query 里的实词单字，供 BM25 的「单字 + 双字」混合粒度使用。
+
+    两个必须避开的坑：
+
+    1. **拉丁词不能拆单字**。`python` 拆成 p/y/t/h/o/n 之后，这些字母在中文
+       语料里 df 极低、idf 极高，一旦某条记忆里出现一个 `p` 就能拿到高分，
+       比命中整个 `python` 还高。整词已由二元组覆盖，这里必须整段跳过。
+    2. **虚词单字必须过滤**。的/了/是/在/我/你 这类字几乎每条记忆都有，
+       idf 会被压到 0.05 的下限，但它们数量多，累加起来足以把真实信号淹掉。
+
+    顺带解决了一个老问题：`norm()` 之后中文没有分隔，单字是唯一能保证
+    「至少有一个字对得上」的粒度——这是「猫叫」匹配「名字叫团子」的关键。
+    """
+    out: list[str] = []
+    for seg in _SPLIT_RE.split(str(text or "").lower()):
+        if len(seg) <= 1 or _LATIN_SEG_RE.match(seg):
+            continue
+        for ch in dict.fromkeys(seg):
+            if ch not in _STOP_CHARS:
+                out.append(ch)
+    return list(dict.fromkeys(out))
 
 
 def _hit_units(query: str, doc_grams: set[str], doc_norm: str) -> int:
@@ -578,32 +641,32 @@ def gate_ok(units: int, hit_n: int, cov: float) -> bool:
 
 def rank_fused(query: str, docs: list[dict[str, Any]], *, k: int = 5,
                rrf_k: int = RRF_K, pool: int = FUSION_POOL,
-               w_a: float = FUSION_W_A, w_b: float = FUSION_W_B,
+               w_a: float | None = None, w_b: float | None = None,
                w_imp: float = FUSION_W_IMP,
                rel_ratio: float = FUSION_REL_RATIO,
                gate: bool = True, dedup: bool = True,
                now: float | None = None, text_key: str = "content",
-               explain: bool = False) -> list[dict]:
-    """双路召回 + RRF 选池 + 加法精排。返回带 `_score` 的前 k 条。
+               explain: bool = False, mode: str = "mixed",
+               gate_floor: float = SOFT_GATE_FLOOR) -> list[dict]:
+    """记忆检索主入口。返回带 `_score` 的前 k 条。
 
-    三段结构，每段解决一个具体问题：
+    两种模式，默认 `mixed`：
 
-    **第一段 双路 RRF 选池。** 两路量纲完全不同（bigram 分 0~1.5、BM25 分 0~30），
-    直接相加没有意义。RRF 用 `1/(k+rank)` 只看名次，天然解决量纲问题。
-    但它**不能当置信度**：候选只有几十条时相邻名次差不到 3%，实测同一批
-    候选里 top1=0.600、其余全在 0.73~0.96 之间，分数被压平到无法截断。
-    所以 RRF 只用来「不漏掉任何一路看好的条目」。
+    **mode="mixed"（v0.3.0 起默认）** —— 混合粒度 BM25 主序 + 软闸门。
+    这是 evals/ 实测出来的最优档：R_frac 90.7%、旧值 0%、沉默率 6.3%
+    （候选池 42 条，注入预算 5）。
 
-    **第二段 池内精排。** 取 RRF 最高的 pool 条，池内对两路分别做 min-max
-    归一（保留相对差距，不让名次抹平），再按 w_a/w_b 加权求和。排序交回
-    有绝对意义的 BM25，这是全部提升的来源。
+    为什么放弃 RRF 融合：原实现把 bigram 路（A）和 BM25 路（B）用
+    `1/(k+rank)` 融合，再 min-max 归一后按 0.35/0.65 加权。实测这比
+    **单纯 B 路低 15.6pp**（57.4% vs 73.0%）。原因是 A 路本身是弱召回，
+    平权进候选池等于用噪声稀释强信号；而 min-max 归一又抹平了 BM25 的
+    绝对尺度，让「分数够不够高」这种判断彻底失效。
 
-    **第三段 注入闸门。** 见 gate_ok：只在注入层做绝对判据，不删候选。
-    rel_ratio 是相对截断，衡量「重要性悬崖」——低于池内首条该比例的条目
-    不再注入；它对候选池本身无影响，所以不会像原门槛那样整条删记忆。
+    现在的做法是：B 路直接出序，A 路只在 `w_a>0` 时作为加分项（默认 0），
+    闸门看 BM25 原始分。少一层融合，反而每项指标都更好。
 
-    与 rank() 的另一个差别：MMR 去冗余放在最后（跨整个池），而不是边排序
-    边去重，这样「两条近似记忆」里留下的总是分数更高的那条。
+    **mode="rrf"** —— 保留原三段式（双路 RRF 选池 → 池内归一精排 →
+    覆盖率闸门），供对照和回退。它的参数语义与 v0.2.x 完全一致。
     """
     if len(norm(query)) < MIN_QUERY_CHARS:
         return []
@@ -619,37 +682,103 @@ def rank_fused(query: str, docs: list[dict[str, Any]], *, k: int = 5,
     qc_set = set(qc)
     q_norm = norm(query)
 
-    # 每条候选只归一化一次：A 路打分、B 路 BM25、闸门、MMR 四处复用。
+    # 每条候选只归一化一次：两路打分、闸门、MMR 四处复用。
     prepared: list[tuple[dict, str, set[str]]] = []
     for d in docs:
         ntext = norm(d.get(text_key, ""))
         prepared.append((d, ntext, gram_set(ntext, normalized=True)))
     n = len(prepared)
 
-    # ---- A 路：bigram/IDF ----
-    df: dict[str, int] = {}
-    for _d, _t, gset in prepared:
-        for g in gset & qg_set:
-            df[g] = df.get(g, 0) + 1
-    idf = {g: math.log(1.0 + n / (1.0 + c)) for g, c in df.items()}
+    # ---- B 路：BM25（mixed 模式含实词单字）----
+    b_scores = bm25_scores(query, docs, text_key=text_key, prepared=prepared,
+                           mixed=(mode == "mixed"))
 
-    a_scores: list[float] = []
-    for d, ntext, gset in prepared:
-        # 粗筛：与实词零交集的文档，score() 内部也会因 cov<=0 返回 0，
-        # 这里提前跳过省掉整次打分（大量候选走到这一步都是 0 分）。
-        if not (qc_set & gset):
-            a_scores.append(0.0)
-            continue
-        a_scores.append(score(
-            query, str(d.get(text_key, "")), idf, qg=qg,
-            ts=float(d.get("ts") or 0), kind=str(d.get("kind") or ""),
-            hits=int(d.get("hits") or 0), now=now,
-            doc_grams=gset, doc_norm=ntext, q_norm=q_norm, qg_set=qg_set))
+    # ---- A 路：bigram/IDF，只在需要时算（默认 w_a=0 时省掉整轮打分）----
+    need_a = (mode == "rrf") or (w_a is not None and w_a > 0)
+    a_scores: list[float] = [0.0] * n
+    if need_a:
+        df: dict[str, int] = {}
+        for _d, _t, gset in prepared:
+            for g in gset & qg_set:
+                df[g] = df.get(g, 0) + 1
+        idf = {g: math.log(1.0 + n / (1.0 + c)) for g, c in df.items()}
+        for i, (d, ntext, gset) in enumerate(prepared):
+            # 粗筛：与实词零交集的文档，score() 内部也会因 cov<=0 返回 0，
+            # 这里提前跳过省掉整次打分。
+            if not (qc_set & gset):
+                continue
+            a_scores[i] = score(
+                query, str(d.get(text_key, "")), idf, qg=qg,
+                ts=float(d.get("ts") or 0), kind=str(d.get("kind") or ""),
+                hits=int(d.get("hits") or 0), now=now,
+                doc_grams=gset, doc_norm=ntext, q_norm=q_norm, qg_set=qg_set)
 
-    # ---- B 路：BM25 ----
-    b_scores = bm25_scores(query, docs, text_key=text_key, prepared=prepared)
+    if mode == "mixed":
+        wa = 0.0 if w_a is None else float(w_a)
+        # 纯 B 路时直接用原始分：它有绝对含义，rel_ratio 和闸门都能用上。
+        # 掺入 A 路时才归一化（两者量纲差一个数量级，直接加没有意义）。
+        if wa <= 0:
+            total = list(b_scores)
+        else:
+            lo_b, hi_b = min(b_scores), max(b_scores)
+            span_b = (hi_b - lo_b) or 1.0
+            lo_a, hi_a = min(a_scores), max(a_scores)
+            span_a = (hi_a - lo_a) or 1.0
+            total = [
+                (1.0 - wa) * (b_scores[i] - lo_b) / span_b
+                + wa * (a_scores[i] - lo_a) / span_a
+                + w_imp * importance_proxy(prepared[i][0])
+                for i in range(n)
+            ]
+        order = sorted(range(n), key=lambda i: -total[i])
 
-    # ---- RRF：只用名次，两路量纲不同也能合 ----
+        # 软闸门：绝对分地板。候选池小时 idf 整体偏低，按池大小等比下调，
+        # 否则「新账号只有 8 条记忆」会永远注不进去。
+        floor = 0.0
+        if gate and gate_floor > 0:
+            floor = float(gate_floor) * min(1.0, n / float(SOFT_GATE_MIN_POOL))
+            if not order or total[order[0]] < floor:
+                return []
+        top = total[order[0]] if order else 0.0
+
+        out: list[dict] = []
+        kept_grams: list[set[str]] = []
+        for i in order:
+            cur = total[i]
+            if cur <= 0:
+                break
+            # 有闸门时用两个绝对阈值（地板 + 相对地板的跟随线）；关掉闸门时
+            # 退回「相对首条」的截断，这是 mode="rrf" 与 v0.2.x 一致的语义。
+            if floor:
+                if cur < floor:
+                    break          # 已按分降序，后面只会更低
+                if out and cur < floor * SOFT_GATE_REL:
+                    break
+            elif rel_ratio > 0 and out and cur < top * rel_ratio:
+                break
+            d, ntext, gset = prepared[i]
+            if dedup and any(_jaccard_sets(gset, kg) >= DEDUP_SIM
+                             for kg in kept_grams):
+                continue
+            item = dict(d)
+            item["_score"] = round(cur, 4)
+            if explain:
+                item["_dbg"] = {
+                    "b": round(b_scores[i], 3), "a": round(a_scores[i], 4),
+                    "hit": len(qc_set & gset),
+                    "cov": round(len(qc_set & gset) / len(qc), 3),
+                    "floor": round(floor, 3),
+                }
+            out.append(item)
+            kept_grams.append(gset)
+            if len(out) >= k:
+                break
+        return out
+
+    # ---- mode="rrf"：v0.2.x 原逻辑，保留作对照 ----
+    wa = FUSION_W_A if w_a is None else float(w_a)
+    wb = FUSION_W_B if w_b is None else float(w_b)
+
     def _ranks(vals: list[float]) -> list[int]:
         order = sorted(range(len(vals)), key=lambda i: -vals[i])
         rk = [0] * len(vals)
@@ -661,11 +790,9 @@ def rank_fused(query: str, docs: list[dict[str, Any]], *, k: int = 5,
     fused = [1.0 / (rrf_k + rk_a[i]) + 1.0 / (rrf_k + rk_b[i])
              for i in range(n)]
 
-    # ---- 第一段：候选池 ----
     pool_n = max(k, min(int(pool), n))
     cand = sorted(range(n), key=lambda i: -fused[i])[:pool_n]
 
-    # ---- 第二段：池内归一后精排 ----
     def _minmax(vals: list[float], idx: list[int]) -> dict[int, float]:
         v = [vals[i] for i in idx]
         lo, hi = min(v), max(v)
@@ -681,7 +808,7 @@ def rank_fused(query: str, docs: list[dict[str, Any]], *, k: int = 5,
         hit_n = len(qc_set & gset)
         scored.append({
             "i": i,
-            "total": (w_a * a_n[i] + w_b * b_n[i]
+            "total": (wa * a_n[i] + wb * b_n[i]
                       + w_imp * importance_proxy(d)),
             "hit_n": hit_n,
             # 闸门用「检索单元命中数」而不是 bigram 个数，理由见 _hit_units：
@@ -693,12 +820,11 @@ def rank_fused(query: str, docs: list[dict[str, Any]], *, k: int = 5,
         })
     scored.sort(key=lambda x: -x["total"])
 
-    # ---- 第三段：闸门 → 相对截断 → MMR ----
     # 单元总数与候选无关，循环外算一次（分档口径见 _query_unit_count：
     # 按全量 bigram 数会把 `ffmpeg` 判成长问句、把 3 个实词的短问句也判成长问句）
     unit_total = _query_unit_count(query, qc_set)
-    out: list[dict] = []
-    kept_grams: list[set[str]] = []
+    out = []
+    kept_grams = []
     base = 0.0
     for x in scored:
         if gate and not gate_ok(unit_total, x["seg_n"], x["cov"]):

@@ -92,7 +92,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。

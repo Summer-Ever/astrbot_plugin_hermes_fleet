@@ -191,7 +191,7 @@ def main() -> int:
     print(f"{'变体':<24}" + "".join(f"{'B=' + str(b):>10}" for b in (1, 2, 3, 5, 8)))
     print("-" * 74)
     scan = {}
-    for name in ("fused", "fused_expand", "bm25_mixed", "hybrid_best"):
+    for name in ("fused", "recall_v2", "recall_v2_expand"):
         row = []
         for b in (1, 2, 3, 5, 8):
             rs = evaluate(name, pool_mode="own", budget=b)
