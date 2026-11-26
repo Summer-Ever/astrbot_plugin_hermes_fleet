@@ -24,7 +24,7 @@ PUBLIC_LINES: tuple[str, ...] = (
 ADMIN_LINES: tuple[str, ...] = (
     "/fleet 状态　　　 本账号记忆概况与模型链",
     "/fleet 我是谁　　 查看平台 id / owner_id",
-    "/fleet 总结　　　 立刻跑一轮后台总结",
+    "/fleet 消息总结为记忆　立刻跑一轮后台总结（旧名「总结」仍可用）",
     "/fleet 整理　　　 合并重复归档记忆",
     "/fleet 账号列表　 列出库里的账号",
     "/fleet 删除账号记忆 <id>　物理删除整个账号库（不可撤销）",

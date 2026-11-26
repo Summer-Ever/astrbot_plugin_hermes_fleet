@@ -130,7 +130,7 @@ fleet 现在只有 WebUI 上的手动编辑，缺这条"批量归位"入口。
 `Depends(require_plugin_scope)`），页面里能看记忆列表、常驻六席、整理日志、
 模型调用记录。
 
-**fleet 有什么**：`/fleet 状态`、`/fleet 我是谁`、`/fleet 总结`、`/fleet 清理`
+**fleet 有什么**：`/fleet 状态`、`/fleet 我是谁`、`/fleet 消息总结为记忆`、`/fleet 清理`
 四条聊天命令。**没有任何网页。**
 
 ### 为什么不能照搬

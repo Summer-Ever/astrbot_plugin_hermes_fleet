@@ -65,12 +65,16 @@ class TestHelp(unittest.TestCase):
             if '.command("' in line and 'def ' not in line
         }
         for name in ("提取常驻记忆", "hc帮助", "提取记忆", "导入记忆",
-                     "常驻", "状态", "我是谁", "总结", "整理",
+                     "常驻", "状态", "我是谁", "消息总结为记忆", "整理",
                      "账号列表", "删除账号记忆", "帮助"):
             self.assertIn(name, registered, f"帮助提到了 /{name}，但没有注册")
 
 
 class TestCommandContract(unittest.TestCase):
+    def test_总结指令改名为消息总结为记忆且保留旧名(self) -> None:
+        """改名不能让习惯 `/fleet 总结` 的人突然失效。"""
+        self.assertIn('@fleet.command("消息总结为记忆", alias={"总结"})', MAIN)
+
     def test_提取常驻记忆两个入口共用一条流程(self) -> None:
         self.assertIn('@filter.command("提取常驻记忆")', MAIN)
         self.assertIn('@fleet.command("提取常驻记忆")', MAIN)

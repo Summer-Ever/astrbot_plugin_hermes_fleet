@@ -69,11 +69,14 @@ class CommandGroup:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.func(*args, **kwargs)
 
-    def command(self, name: str):
+    def command(self, name: str, *args: Any, alias: Any = None,
+                **kwargs: Any):
         def decorator(fn):
             fn.__command__ = name
             fn.__command_group__ = self.name
-            self.handlers[name] = fn
+            # 宿主支持 `alias={"旧名"}`：别名与主名注册同一个处理函数。
+            for cmd in [name, *(sorted(alias) if alias else [])]:
+                self.handlers[cmd] = fn
             return fn
 
         return decorator

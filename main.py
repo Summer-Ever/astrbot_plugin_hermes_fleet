@@ -1095,7 +1095,7 @@ class HermesFleet(Star):
                "已导入到当前账号。" if payload.get("bot_id") else "")
         )
 
-    @fleet.command("总结")
+    @fleet.command("消息总结为记忆", alias={"总结"})
     async def fleet_summarize(self, event: AstrMessageEvent):
         """手动跑一轮总结（管理员）。用来验证模型链通不通，不必等 15 分钟。"""
         if not self._is_admin(event):
@@ -1167,7 +1167,7 @@ class HermesFleet(Star):
         为什么单账号失败要吞掉：一个账号的库文件损坏（磁盘满、被外部删了）
         不该让其余 99 个账号永远停止总结。
 
-        `force=True` 供手动入口（面板「立刻总结」、`/fleet 总结`）用：不看
+        `force=True` 供手动入口（面板「立刻总结」、`/fleet 消息总结为记忆`）用：不看
         条数与静默时间，有多少总结多少。后台循环不传，保持原来的触发条件。
         """
         if not as_flag(self._get_cfg("summarize_enabled", True), True):
