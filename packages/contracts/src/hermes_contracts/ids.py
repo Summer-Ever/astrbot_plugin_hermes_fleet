@@ -144,12 +144,12 @@ class MemoryKey:
 
 
 class ResidentBlock(str, Enum):
-    """常驻的六个封闭词条。
+    """常驻的七个封闭词条（其中 `intimacy` 只由用户指令维护，不进 AI 工具）。
 
-    为什么是封闭六个而不是动态条目：hermes_core 的 README 记了一次真实教训——
+    为什么是封闭槽位而不是动态条目：hermes_core 的 README 记了一次真实教训——
     按「条数」分配预算时，6 个槽位里 2 个被同一句「叫哥哥」占满，用户信息、
     偏好、避雷全被挤掉。改成「固定槽位、整段覆盖」后规模天然有界
-    （最多 6 × 4KB），且空槽不注入，注入成本可预测。
+    （最多 7 × 2000 字），且空槽不注入，注入成本可预测。
 
     顺序即注入顺序，不要随手调换：模型对靠前的内容注意力更高，
     `address`（称呼）必须在最前面，否则会出现叫错人的体感问题。
@@ -159,6 +159,9 @@ class ResidentBlock(str, Enum):
     ASSISTANT = "assistant"    # 助手在这个场景里的自我设定
     USER = "user"              # 用户的基本信息
     PREFERENCE = "preference"  # 偏好与忌讳
+    # 亲密关系与情感表达。**只由用户用指令维护**，不进 AI 的 update_resident
+    # 白名单：模型最容易把「聊得热络」误判成「关系变了」，自我发挥改写它。
+    INTIMACY = "intimacy"
     STYLE = "style"            # 回复风格
     RULES = "rules"            # 规则与避雷
 
@@ -170,6 +173,7 @@ class ResidentBlock(str, Enum):
             cls.ASSISTANT,
             cls.USER,
             cls.PREFERENCE,
+            cls.INTIMACY,
             cls.STYLE,
             cls.RULES,
         )

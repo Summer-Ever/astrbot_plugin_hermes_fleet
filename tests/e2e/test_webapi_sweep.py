@@ -249,6 +249,26 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["status"], 200, res)
         self.assertIn(gid, str(res["data"]), "群会话不该在未总结视图里消失")
 
+    async def test_亲密关系词条只由指令维护(self) -> None:
+        """模型读得到、改不了：用户用指令整段覆盖，AI 工具必须拒绝。"""
+        ev = self.env.event(message="修改亲密关系和情感表达 喜欢被温柔地叫宝贝")
+        out = [str(r.get("text") if isinstance(r, dict) else r)
+               async for r in self.env.plugin.fleet_set_intimacy(ev)]
+        self.assertIn("已更新", "".join(out))
+
+        scene = await self.env.plugin.svc.scene(
+            platform_id="qq-01", sender_id="u1", group_id="", is_group=False)
+        snapshot = await self.env.plugin.svc.resident_snapshot(scene)
+        self.assertIn("宝贝", snapshot.get("intimacy", ""))
+        # 注入块里必须看得到——它是给模型读的，只是不许它写。
+        block = await self.env.plugin.svc.inject_block(scene, "")
+        self.assertIn("宝贝", block)
+
+        msg = await self.env.plugin.tool_update_resident(ev, "intimacy", "AI 乱改")
+        self.assertIn("不由你维护", msg)
+        snapshot = await self.env.plugin.svc.resident_snapshot(scene)
+        self.assertIn("宝贝", snapshot.get("intimacy", ""), "AI 不能覆盖")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -176,11 +176,12 @@ class TestEditDeleteMerge(AdminBase):
 
 
 class TestResident(AdminBase):
-    async def test_six_slots_always_present(self) -> None:
+    async def test_all_slots_always_present(self) -> None:
         """没设置过的槽位也要出现——否则界面上「清空过」和「没设置」长得一样。"""
         slots = await admin.resident_of(self.db, BOT, "u1", "private")
-        self.assertEqual(len(slots), 6)
+        self.assertEqual(len(slots), 7)
         self.assertEqual(slots["address"], "")
+        self.assertEqual(slots["intimacy"], "")
 
     async def test_save_then_clear(self) -> None:
         await admin.save_resident(self.db, BOT, "u1", "private", "address", "叫哥哥")

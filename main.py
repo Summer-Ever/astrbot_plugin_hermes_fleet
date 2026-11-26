@@ -686,6 +686,16 @@ class HermesFleet(Star):
             text (string): 该词条的完整新文本（整段替换，不是追加）；空文本 = 清空该词条
         """
         scene = await self.svc.scene(**self._scene_args(event))
+        # 「亲密关系与情感表达」故意不在本工具的可维护范围内：模型最容易把
+        # 「这轮聊得热络」误判成「关系变了」，自作主张改写。它只由用户用
+        # 「修改亲密关系和情感表达」指令整段覆盖。
+        from hermes_fleet.resident import resolve_block
+
+        if resolve_block(str(block or "")) is ResidentBlock.INTIMACY:
+            return (
+                "「亲密关系与情感表达」不由你维护：它只能由用户本人用"
+                "「修改亲密关系和情感表达」指令整段改写。请继续正常对话，不要改写它。"
+            )
         try:
             entry = await self.svc.set_resident(scene, str(block or ""), str(text or ""))
         except ValueError as exc:
@@ -804,8 +814,9 @@ class HermesFleet(Star):
             else:
                 lines.append(f"- {label}：（空）")
         lines.append(
-            f"共 {filled}/6 条。改法：直接对我说「以后叫我阿明」"
+            f"共 {filled}/{len(ResidentBlock.ordered())} 条。改法：直接对我说「以后叫我阿明」"
             "「别记着我不吃辣」，我会自己改这一套。"
+            "「亲密关系与情感表达」我不管，用 /fleet 修改亲密关系和情感表达 自己写。"
         )
         yield event.plain_result("\n".join(lines))
 
@@ -820,6 +831,49 @@ class HermesFleet(Star):
         """同 /提取常驻记忆（命令组入口）。"""
         async for result in self._resident_prompt_flow(event):
             yield result
+
+    @filter.command("修改亲密关系和情感表达")
+    async def set_intimacy(self, event: AstrMessageEvent):
+        """整段覆盖当前场景的「亲密关系与情感表达」词条（AI 不会改它）。"""
+        async for result in self._intimacy_flow(event):
+            yield result
+
+    @fleet.command("修改亲密关系和情感表达")
+    async def fleet_set_intimacy(self, event: AstrMessageEvent):
+        """同 /修改亲密关系和情感表达（命令组入口）。"""
+        async for result in self._intimacy_flow(event):
+            yield result
+
+    async def _intimacy_flow(self, event: AstrMessageEvent):
+        """用户直接书写「亲密关系与情感表达」，整段覆盖。
+
+        为什么不交给模型维护：这条词条写的是关系与情感表达方式，最容易被
+        「这一轮聊得亲近」误导而越写越甜、越写越长。用户自己写一次，
+        存进去是什么就是什么；模型只负责读，不负责改。
+        """
+        marker = "修改亲密关系和情感表达"
+        raw = str(event.message_str or "").strip()
+        rest = raw.split(marker, 1)[1].strip() if marker in raw else ""
+        if rest in ("清空", "清除", "删除"):
+            rest = ""
+        elif not rest:
+            yield event.plain_result(
+                "用法：/fleet 修改亲密关系和情感表达 <内容>（整段覆盖当前场景）；"
+                "发送「清空」可清空。")
+            return
+        scene = await self.svc.scene(**self._scene_args(event))
+        try:
+            entry = await self.svc.set_resident(scene, "intimacy", rest)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+        where = "本群" if scene.is_group else "私聊"
+        if not entry.text:
+            yield event.plain_result(f"已清空{where}的「亲密关系与情感表达」。")
+            return
+        yield event.plain_result(
+            f"已更新{where}的「亲密关系与情感表达」"
+            f"（{len(entry.text)}/{MAX_RESIDENT_BLOCK_CHARS} 字），整段覆盖。")
 
     async def _resident_prompt_flow(self, event: AstrMessageEvent):
         """导出注入块原文，不改写、不摘要。

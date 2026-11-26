@@ -232,8 +232,10 @@ class TestClock(unittest.TestCase):
 
 
 class TestResidentBlocks(unittest.TestCase):
-    def test_exactly_six_blocks(self) -> None:
-        self.assertEqual(len(ResidentBlock), 6, "常驻是封闭六席，加成员要改注入预算")
+    def test_seven_blocks(self) -> None:
+        self.assertEqual(
+            len(ResidentBlock), 7,
+            "常驻是封闭七席（新增 intimacy），加成员要改注入预算")
 
     def test_address_is_first(self) -> None:
         """称呼必须排第一：模型对靠前内容注意力更高，排后面会叫错人。"""

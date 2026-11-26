@@ -66,6 +66,7 @@ class TestHelp(unittest.TestCase):
         }
         for name in ("提取常驻记忆", "hc帮助", "提取记忆", "导入记忆",
                      "常驻", "状态", "我是谁", "消息总结为记忆", "整理",
+                     "修改亲密关系和情感表达",
                      "账号列表", "删除账号记忆", "帮助"):
             self.assertIn(name, registered, f"帮助提到了 /{name}，但没有注册")
 

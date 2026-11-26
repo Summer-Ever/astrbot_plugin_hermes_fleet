@@ -40,6 +40,7 @@ BLOCK_LABELS: dict[ResidentBlock, str] = {
     ResidentBlock.ASSISTANT: "助手设定",
     ResidentBlock.USER: "用户信息",
     ResidentBlock.PREFERENCE: "偏好与忌讳",
+    ResidentBlock.INTIMACY: "亲密关系与情感表达",
     ResidentBlock.STYLE: "回复风格",
     ResidentBlock.RULES: "规则与避雷",
 }
@@ -56,6 +57,7 @@ INJECT_LABELS: dict[ResidentBlock, str] = {
     ResidentBlock.ASSISTANT: "你的自我设定",
     ResidentBlock.USER: "用户的客观信息",
     ResidentBlock.PREFERENCE: "用户的偏好与忌讳",
+    ResidentBlock.INTIMACY: "与对方的亲密关系和情感表达",
     ResidentBlock.STYLE: "回复风格要求",
     ResidentBlock.RULES: "规则与避雷",
 }
@@ -71,7 +73,7 @@ GROUP_NOTE = (
     "不要推测、引用或提及用户的私聊内容]"
 )
 
-# 注入块总长上限。六词条满配是 6 × 2000 字符 = 12000，全塞进去会挤掉真正的
+# 注入块总长上限。七词条满配是 7 × 2000 字符 = 14000，全塞进去会挤掉真正的
 # 对话。这里用字符预算硬截断，宁可丢掉尾部词条也不让注入失控——
 # hermes_core 早期就是没有这个上限，一次误写把整轮上下文占满。
 MAX_INJECT_CHARS = 4_000
