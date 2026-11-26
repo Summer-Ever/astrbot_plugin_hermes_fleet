@@ -216,6 +216,26 @@
               <div class="result" id="summarize-result"></div>
             </div>
             <div class="card">
+              <h3>总结预览</h3>
+              <p>先看模型会从待总结消息里写出哪些记忆。预览只读：不写库、不标记消息；
+                确认后才真正执行。</p>
+              <div class="toolbar">
+                <button class="btn" id="btn-preview-summarize">生成预览</button>
+                <button class="btn primary hidden" id="btn-apply-summarize">确认写入</button>
+              </div>
+              <div class="result" id="preview-summarize-result"></div>
+            </div>
+            <div class="card">
+              <h3>深度整理预览</h3>
+              <p>先看深度整理打算把哪些记忆并成一条（含合并后的表述）。只检查达到整理
+                阈值（默认 30 条活跃记忆）的作用域；预览只读，确认后才写库。</p>
+              <div class="toolbar">
+                <button class="btn" id="btn-preview-consolidate">生成预览</button>
+                <button class="btn primary hidden" id="btn-apply-consolidate">确认整理</button>
+              </div>
+              <div class="result" id="preview-consolidate-result"></div>
+            </div>
+            <div class="card">
               <h3>导入记忆</h3>
               <p>选一份「记忆配置」文档（hermes-memory-*.md），把常驻与归档记忆写回本账号。常驻按词条覆盖，归档记忆追加。导入不经对话，机器人不会把它当成聊天内容。</p>
               <div class="import-form">

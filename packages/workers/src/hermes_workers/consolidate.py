@@ -177,10 +177,92 @@ class MemoryConsolidator:
         memories: MemoryStore,
     ) -> tuple[int, int]:
         """整理一个作用域，返回 `(合并条数, 处理的组数)`。"""
-        items = [m for m in await memories.list_active(key, limit=self.scan_limit) if m.is_active]
-        if len(items) < 2:
+        decided = await self._decide(key, count=count, memories=memories)
+        if decided is None:
             self._mark(key, count)
             return 0, 0
+        by_id, decisions, allowed = decided
+        merged = await self._apply(
+            decisions, by_id=by_id, allowed=allowed, memories=memories)
+        self._mark(key, count)
+        return merged, len(decisions)
+
+    async def preview_bot(self, bot_id: BotId, *, memories: MemoryStore) -> dict:
+        """只读预览：调模型判断该并哪些，但一条都不写。
+
+        与 `run_bot` 共用 `_decide()`，保证「预览看到的组」＝「执行时会处理
+        的组」。不看条数增长与冷却：预览是用户当下主动要求的。
+        """
+        scopes = await memories.list_scopes(bot_id, min_active=self.min_active)
+        plans: list[dict] = []
+        for key, count in list(scopes)[: self.max_scopes]:
+            raw_scope = getattr(key, "scope", "")
+            plan = {
+                # 枚举在 3.11+ 的 str() 是「MemoryScope.USER」，页面要原始值。
+                "scope": str(getattr(raw_scope, "value", raw_scope)),
+                "owner_id": str(key.owner_id or ""),
+                "group_id": str(key.group_id or ""),
+                "active": int(count),
+                "groups": [],
+                "error": "",
+            }
+            try:
+                plan["groups"] = await self.preview_scope(
+                    key, count=count, memories=memories)
+            except Exception as exc:
+                plan["error"] = str(exc)
+            plans.append(plan)
+        return {"scopes": len(scopes), "plans": plans}
+
+    async def preview_scope(
+        self,
+        key: MemoryKey,
+        *,
+        count: int,
+        memories: MemoryStore,
+    ) -> list[dict]:
+        """预览一个作用域会怎么合并；每一项是一组「保留谁、并掉谁」。"""
+        decided = await self._decide(key, count=count, memories=memories)
+        if decided is None:
+            return []
+        by_id, decisions, allowed = decided
+        active = set(allowed) & set(by_id)
+        plan: list[dict] = []
+        for decision in decisions:
+            if len(plan) >= self.max_merges:
+                break
+            keep = int(decision["keep"])
+            if keep not in active:
+                continue
+            sources = [x for x in decision["merge"] if x in active and x != keep]
+            if not sources:
+                continue
+            plan.append({
+                "keep": {"id": keep, "content": by_id[keep].content},
+                "merge": [
+                    {"id": int(x), "content": by_id[int(x)].content}
+                    for x in sources
+                ],
+                "content": str(decision.get("content") or "").strip(),
+            })
+            active.difference_update(sources)
+        return plan
+
+    async def _decide(
+        self,
+        key: MemoryKey,
+        *,
+        count: int,
+        memories: MemoryStore,
+    ) -> tuple[dict[int, Memory], list[dict], set[int]] | None:
+        """共同前半段：拉活跃记忆 → 本地配对 → 问模型 → 校验 id 白名单。
+
+        返回 `None` 表示这个作用域配不出组（记忆太少或都不够相似）。
+        真实整理与预览共用这一段，避免两条路径的判断规则漂移。
+        """
+        items = [m for m in await memories.list_active(key, limit=self.scan_limit) if m.is_active]
+        if len(items) < 2:
+            return None
 
         groups = build_groups(
             [m.content for m in items],
@@ -188,9 +270,7 @@ class MemoryConsolidator:
             max_group_size=self.max_group_size,
         )
         if not groups:
-            # 没有配对结果也要记状态：否则每轮都会把同样的 200 条重新配一遍。
-            self._mark(key, count)
-            return 0, 0
+            return None
 
         by_id = {int(m.id): m for m in items}
         picked = [
@@ -217,11 +297,7 @@ class MemoryConsolidator:
         decisions = parse_decisions(raw)
         if not decisions and raw.strip() and not looks_like_complete_array(raw):
             raise RuntimeError("整理输出不完整（缺少闭合的 JSON 数组），本轮放弃")
-
-        merged = await self._apply(
-            decisions, by_id=by_id, allowed=allowed, memories=memories)
-        self._mark(key, count)
-        return merged, len(decisions)
+        return by_id, decisions, allowed
 
     # ------------------------------------------------------------ 落库
 

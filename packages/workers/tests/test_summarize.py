@@ -138,6 +138,28 @@ class TestTrigger(Base):
         self.db4.close()
 
 
+class TestPreview(Base):
+    async def test_预览不写库也不标记消息(self) -> None:
+        """预览是只读的：管理员确认之前，库与队列都不能变。"""
+        await self.seed(2, sender="u1")
+        llm = FakeLlm(json.dumps([
+            {"content": "用户在做 AstrBot 记忆插件", "kind": "fact", "owner": "u1"},
+        ]))
+        plan = await self.worker(llm).preview_bot(
+            self.BOT, messages=self.db.messages)
+        self.assertEqual(plan["sessions"], 1)
+        self.assertEqual(plan["messages"], 2)
+        self.assertEqual(len(plan["items"]), 1)
+        self.assertEqual(plan["items"][0]["owner"], "u1", "私聊必须归给发言人")
+
+        rows = await self.db.memories.list_active(
+            MemoryKey(bot_id=self.BOT, scope=MemoryScope.USER, owner_id="u1"),
+            limit=10)
+        self.assertEqual(rows, [], "预览不能写库")
+        pending = await self.db.messages.list_pending_sessions(self.BOT, limit=10)
+        self.assertEqual(len(pending), 1, "预览不能标记消息")
+
+
 class TestOwnership(Base):
     async def test_私聊模型漏写归属仍归给本人(self) -> None:
         """私聊只有一个发言人：模型写成昵称或干脆不写，也必须归给他本人。

@@ -40,6 +40,7 @@ from hermes_contracts import (
     MemoryKey,
     MemoryScope,
     MemoryStore,
+    Message,
     MessageStore,
     OwnerId,
     SessionId,
@@ -190,11 +191,74 @@ class SessionSummarizer:
         if not batch:
             return 0, 0
 
+        entries, senders, solo, group_id = await self._draft(batch)
+        saved = 0
+        for entry in entries:
+            if await self._persist(entry, bot_id=bot_id, senders=senders, solo=solo,
+                                   group_id=group_id, memories=memories,
+                                   identities=identities):
+                saved += 1
+
+        # 解析出空数组也要标记：见模块 docstring 第 2 条。全是空消息
+        # （纯图片/表情）同样在这里落标记，否则它们会永远留在队列里。
+        marked = await messages.mark_summarized([m.id for m in batch])
+        return saved, marked
+
+    async def preview_bot(
+        self,
+        bot_id: BotId,
+        *,
+        messages: MessageStore,
+    ) -> dict:
+        """只读预览：真的调模型，但不写库、不标记消息。
+
+        与 `run_bot` 的唯一差别在最后一步：这里把「准备写什么」原样交出来，
+        让管理员确认后再执行。预览本身是用户主动要求的，所以不看条数与
+        静默时间——攒了三条时也应该看得见。
+        """
+        pending = await messages.list_pending_sessions(
+            bot_id, limit=self.max_sessions)
+        sessions = 0
+        total_messages = 0
+        items: list[dict] = []
+        for session_id, _count, _last_ts in pending:
+            batch = await messages.fetch_unsummarized(
+                bot_id, session_id, limit=self.batch_limit)
+            if not batch:
+                continue
+            sessions += 1
+            total_messages += len(batch)
+            entries, senders, solo, group_id = await self._draft(batch)
+            for entry in entries:
+                content = clip(str(entry.get("content") or "").strip(),
+                               MAX_MEMORY_CHARS)
+                if not content:
+                    continue
+                raw_owner = str(entry.get("owner") or "").strip()
+                items.append({
+                    "session_id": str(session_id),
+                    "content": content,
+                    "kind": str(entry.get("kind") or "fact"),
+                    # 展示「执行后会归给谁」：私聊强制归发言人，群聊只认
+                    # 本批发言人里出现过的名字，其余降级成群公共。
+                    "owner": solo if not group_id else (
+                        raw_owner if raw_owner in senders else ""),
+                    "group_id": group_id,
+                    "messages": len(batch),
+                })
+        return {"sessions": sessions, "messages": total_messages, "items": items}
+
+    async def _draft(
+        self, batch: Sequence[Message],
+    ) -> tuple[list[dict], set[str], str, str]:
+        """把一批消息交给模型并解析，返回 (词条, 发言人集合, 私聊发言人, 群 id)。
+
+        预览与真实总结共用这一段：两条路径必须对同一批消息给出同一份判断，
+        否则会出现「预览说 3 条、执行写 5 条」。这里**不写库、不标记**。
+        """
         transcript, senders, only_sender = build_transcript(batch)
         if not transcript.strip():
-            # 全是空消息（纯图片/表情）：没有可提炼的文本，直接标记，
-            # 否则这些消息会永远留在队列里。
-            return 0, await messages.mark_summarized([m.id for m in batch])
+            return [], senders, only_sender, ""
 
         group_id = next((m.group_id for m in batch if m.group_id), "")
         # solo 只在**私聊**成立：私聊只有一个发言人，归属无歧义，模型漏写或
@@ -222,16 +286,7 @@ class SessionSummarizer:
             # provider 没暴露 finish_reason 时，截断只能从这里暴露出来：
             # 有内容但连右括号都没有。这时**不能标记**，否则素材永久丢失。
             raise RuntimeError("总结输出不完整（缺少闭合的 JSON 数组），本轮放弃")
-        saved = 0
-        for entry in entries:
-            if await self._persist(entry, bot_id=bot_id, senders=senders, solo=solo,
-                                   group_id=group_id, memories=memories,
-                                   identities=identities):
-                saved += 1
-
-        # 解析出空数组也要标记：见模块 docstring 第 2 条。
-        marked = await messages.mark_summarized([m.id for m in batch])
-        return saved, marked
+        return entries, senders, solo, group_id
 
     # ------------------------------------------------------------ 落库
 

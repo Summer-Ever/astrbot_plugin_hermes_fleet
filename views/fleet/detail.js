@@ -748,6 +748,167 @@
     }
   }
 
+  // ---------------------------------------------------------------- 预览
+
+  function renderLog(out, lines) {
+    (lines || []).forEach((line) => {
+      out.appendChild(el("p", "dim small", "· " + line));
+    });
+  }
+
+  function scopeText(p) {
+    let label = p.scope;
+    if (p.scope === "group") label = "群 " + (p.group_id || "?");
+    else if (p.scope === "user") label = "用户 " + (p.owner_id || "(空)");
+    return label + "（活跃 " + p.active + " 条）";
+  }
+
+  async function previewSummarize() {
+    const btn = $("btn-preview-summarize");
+    const apply = $("btn-apply-summarize");
+    const out = $("preview-summarize-result");
+    btn.disabled = true;
+    btn.textContent = "预览中…";
+    apply.classList.add("hidden");
+    clear(out);
+    out.appendChild(el("p", "dim small", "正在调用模型，可能需要几十秒…"));
+    try {
+      const d = await apiPost("actions/summarize/preview", { platform_id: st.pid });
+      clear(out);
+      out.appendChild(el("p", "small",
+        "会话 " + d.sessions + " 个 / 消息 " + d.messages + " 条 → 拟写 " +
+        d.items.length + " 条记忆，用时 " + (d.elapsed_ms / 1000).toFixed(1) + "s"));
+      if (!d.items.length) {
+        out.appendChild(el("p", "dim small",
+          "没有可写的记忆：这批对话没有可提炼的内容。"));
+      }
+      d.items.forEach((it) => {
+        const row = el("div", "preview-item");
+        row.appendChild(el("span", "badge muted", it.kind));
+        row.appendChild(el("span", "preview-text", it.content));
+        row.appendChild(el("span", "dim small",
+          it.owner ? "→ " + it.owner : "→ 群公共"));
+        out.appendChild(row);
+      });
+      renderLog(out, d.log);
+      if (d.items.length) {
+        apply.classList.remove("hidden");
+        toast("预览完成，确认后才会写库");
+      } else {
+        toast("预览完成：没有可写的记忆");
+      }
+    } catch (err) {
+      clear(out);
+      out.textContent = "预览失败：" + errMsg(err);
+      toast("预览失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "生成预览";
+    }
+  }
+
+  async function applySummarize() {
+    const apply = $("btn-apply-summarize");
+    const out = $("preview-summarize-result");
+    apply.disabled = true;
+    apply.textContent = "写入中…";
+    try {
+      const d = await apiPost("actions/summarize", { platform_id: st.pid });
+      clear(out);
+      out.appendChild(el("p", "small", d.result || "总结完成"));
+      renderLog(out, d.log);
+      apply.classList.add("hidden");
+      toast("已写入 " + d.memories + " 条记忆，标记 " + d.messages + " 条消息");
+    } catch (err) {
+      toast("写入失败：" + errMsg(err), true);
+    } finally {
+      apply.disabled = false;
+      apply.textContent = "确认写入";
+    }
+  }
+
+  function mergeRow(g) {
+    const box = el("div", "preview-item");
+    box.appendChild(el("span", "badge accent", "保留 #" + g.keep.id));
+    box.appendChild(el("span", "preview-text", g.keep.content));
+    g.merge.forEach((m) => {
+      const row = el("div", "preview-item dim");
+      row.appendChild(el("span", "badge muted", "并入 #" + m.id));
+      row.appendChild(el("span", "preview-text", m.content));
+      box.appendChild(row);
+    });
+    if (g.content) {
+      const row = el("div", "preview-item");
+      row.appendChild(el("span", "badge ok", "新表述"));
+      row.appendChild(el("span", "preview-text", g.content));
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  async function previewConsolidate() {
+    const btn = $("btn-preview-consolidate");
+    const apply = $("btn-apply-consolidate");
+    const out = $("preview-consolidate-result");
+    btn.disabled = true;
+    btn.textContent = "预览中…";
+    apply.classList.add("hidden");
+    clear(out);
+    out.appendChild(el("p", "dim small", "正在调用模型，可能需要几十秒…"));
+    try {
+      const d = await apiPost("actions/consolidate/preview", { platform_id: st.pid });
+      clear(out);
+      out.appendChild(el("p", "small",
+        "检查 " + d.scopes + " 个作用域 → " + d.groups + " 组建议（共 " +
+        d.merges + " 条会被并掉），用时 " + (d.elapsed_ms / 1000).toFixed(1) + "s"));
+      if (!d.groups) {
+        out.appendChild(el("p", "dim small", "没有可合并的重复记忆。"));
+      }
+      d.plans.forEach((p) => {
+        if (!p.groups.length && !p.error) return;
+        const sec = el("div", "preview-group");
+        sec.appendChild(el("p", "small", scopeText(p)));
+        if (p.error) sec.appendChild(el("p", "dim small", "失败：" + p.error));
+        p.groups.forEach((g) => sec.appendChild(mergeRow(g)));
+        out.appendChild(sec);
+      });
+      renderLog(out, d.log);
+      if (d.groups) {
+        apply.classList.remove("hidden");
+        toast("预览完成，确认后才会写库");
+      } else {
+        toast("预览完成：没有可合并的记忆");
+      }
+    } catch (err) {
+      clear(out);
+      out.textContent = "预览失败：" + errMsg(err);
+      toast("预览失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "生成预览";
+    }
+  }
+
+  async function applyConsolidate() {
+    const apply = $("btn-apply-consolidate");
+    const out = $("preview-consolidate-result");
+    apply.disabled = true;
+    apply.textContent = "整理中…";
+    try {
+      const d = await apiPost("actions/consolidate", { platform_id: st.pid });
+      clear(out);
+      out.appendChild(el("p", "small", d.result || "整理完成"));
+      renderLog(out, d.log);
+      apply.classList.add("hidden");
+      toast("已合并 " + d.merged + " 条记忆（" + d.groups + " 组）");
+    } catch (err) {
+      toast("整理失败：" + errMsg(err), true);
+    } finally {
+      apply.disabled = false;
+      apply.textContent = "确认整理";
+    }
+  }
+
   // ---------------------------------------------------------------- tab
 
   function switchTab(name) {
@@ -791,6 +952,12 @@
       $("import-result").textContent = "";
       $("btn-import").disabled = true;
       $("btn-import").textContent = "选择文档后导入";
+      // 预览结果跟着账号走：换账号必须先清掉上一家的，否则会误以为
+      // 这些待写记忆属于当前账号。
+      $("preview-summarize-result").textContent = "";
+      $("preview-consolidate-result").textContent = "";
+      $("btn-apply-summarize").classList.add("hidden");
+      $("btn-apply-consolidate").classList.add("hidden");
       clear($("mem-list"));
       renderHead();
       renderMemories();
@@ -827,6 +994,10 @@
     $("btn-msg").addEventListener("click", loadMessages);
     $("btn-summarize").addEventListener("click", runSummarize);
     $("btn-ov-save").addEventListener("click", saveOverrides);
+    $("btn-preview-summarize").addEventListener("click", previewSummarize);
+    $("btn-apply-summarize").addEventListener("click", applySummarize);
+    $("btn-preview-consolidate").addEventListener("click", previewConsolidate);
+    $("btn-apply-consolidate").addEventListener("click", applyConsolidate);
     $("import-file").addEventListener("change", onImportPick);
     $("btn-import").addEventListener("click", runImport);
 

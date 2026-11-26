@@ -521,6 +521,15 @@ button, input, select { font: inherit; color: inherit; }
 .ov-row .ov-label { font-size: 13px; }
 .ov-row .input { min-width: 132px; max-width: 160px; }
 
+.preview-group { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.preview-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 4px 0; font-size: 12.5px;
+}
+.preview-item.dim { opacity: .7; }
+.preview-text { flex: 1; min-width: 0; word-break: break-word; }
+.result .badge { flex: none; }
+
 .merge-list { overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .merge-row {
   display: flex; gap: 8px; align-items: flex-start;

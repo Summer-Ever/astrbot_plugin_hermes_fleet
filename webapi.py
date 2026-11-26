@@ -79,6 +79,14 @@ class FleetWebAPI:
              "未总结消息，按会话分组"),
             (f"{self.prefix}/actions/summarize", self.action_summarize, ["POST"],
              "立刻对该账号跑一轮总结"),
+            (f"{self.prefix}/actions/summarize/preview",
+             self.action_summarize_preview, ["POST"],
+             "预览：待总结消息会写出哪些记忆（不写库、不标记）"),
+            (f"{self.prefix}/actions/consolidate/preview",
+             self.action_consolidate_preview, ["POST"],
+             "预览：深度整理会把哪些记忆并成一条（不写库）"),
+            (f"{self.prefix}/actions/consolidate", self.action_consolidate, ["POST"],
+             "对该账号跑一轮深度整理（真实写库）"),
             (f"{self.prefix}/memory/import", self.memory_import, ["POST"],
              "从记忆配置文档导入常驻与归档记忆（管理员后台，不经对话）"),
             (f"{self.prefix}/open-root", self.open_root, ["POST"],
@@ -553,7 +561,7 @@ class FleetWebAPI:
         """对该账号立刻跑一轮总结。
 
         这是「看得到问题之后能立刻动手」的那一步：静默账号的真正原因常常是
-        消息攒着没被总结，等后台循环可能要 15 分钟。
+        消息攒着没被总结，等后台循环可能要 15 分钟。手动入口不看条数阈值。
         """
         body = await self._body()
         pid = str(body.get("platform_id") or "").strip()
@@ -561,6 +569,8 @@ class FleetWebAPI:
         if err is not None:
             return err
         bot = self.plugin.svc.bot_of(pid)
+        started = time.time()
+        logger.info(f"[hermes_fleet] 手动总结开始：{pid}")
         try:
             outcome = await self.plugin.summarizer.run_bot(
                 bot, messages=db.messages, memories=db.memories,
@@ -570,13 +580,129 @@ class FleetWebAPI:
                 force=True,
             )
         except Exception:
-            logger.error(f"[hermes_fleet] 账号 {pid} 手动总结失败:\n{_tb()}")
+            logger.error(f"[hermes_fleet] 账号 {pid} 手动总结失败：\n{_tb()}")
             return self._fail("总结失败，详见插件日志", 500)
+        elapsed = time.time() - started
+        logger.info(
+            f"[hermes_fleet] 手动总结完成：{pid}，{outcome}，用时 {elapsed:.1f}s")
         return json_response({
             "result": str(outcome),
             "memories": int(getattr(outcome, "memories", 0) or 0),
             "messages": int(getattr(outcome, "messages", 0) or 0),
             "failures": int(getattr(outcome, "failures", 0) or 0),
+            "elapsed_ms": int(elapsed * 1000),
+            "log": [
+                f"会话 {getattr(outcome, 'sessions_seen', 0)} 个，"
+                f"处理 {getattr(outcome, 'sessions_done', 0)} 个",
+                f"新增记忆 {getattr(outcome, 'memories', 0)} 条，"
+                f"标记消息 {getattr(outcome, 'messages', 0)} 条",
+                f"用时 {elapsed:.1f}s",
+            ],
+        })
+
+    async def action_summarize_preview(self):
+        """只调模型、不写库：把「准备写什么」交给管理员确认。
+
+        预览与真实总结共用 worker 的 `_draft()`，所以看到的词条就是执行时
+        会尝试写入的那一批（是否落库仍由执行时的归属/查重决定）。
+        """
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        started = time.time()
+        logger.info(f"[hermes_fleet] 总结预览开始：{pid}")
+        try:
+            plan = await self.plugin.summarizer.preview_bot(
+                self.plugin.svc.bot_of(pid), messages=db.messages)
+        except Exception as exc:
+            logger.error(f"[hermes_fleet] 账号 {pid} 总结预览失败：\n{_tb()}")
+            return self._fail(f"预览失败：{exc}", 500)
+        elapsed = time.time() - started
+        logger.info(
+            f"[hermes_fleet] 总结预览完成：{pid}，{plan['sessions']} 个会话 / "
+            f"{plan['messages']} 条消息 → 拟写 {len(plan['items'])} 条记忆，"
+            f"用时 {elapsed:.1f}s（未写库）")
+        return json_response({
+            "platform_id": pid,
+            "sessions": plan["sessions"],
+            "messages": plan["messages"],
+            "items": plan["items"],
+            "elapsed_ms": int(elapsed * 1000),
+            "log": [
+                f"扫描到 {plan['sessions']} 个会话、"
+                f"{plan['messages']} 条待总结消息",
+                f"模型给出 {len(plan['items'])} 条待写记忆",
+                f"用时 {elapsed:.1f}s；预览不写库、不标记消息",
+            ],
+        })
+
+    async def action_consolidate_preview(self):
+        """只调模型、不写库：把「打算怎么并」交给管理员确认。"""
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        started = time.time()
+        logger.info(f"[hermes_fleet] 整理预览开始：{pid}")
+        try:
+            plan = await self.plugin.consolidator.preview_bot(
+                self.plugin.svc.bot_of(pid), memories=db.memories)
+        except Exception as exc:
+            logger.error(f"[hermes_fleet] 账号 {pid} 整理预览失败：\n{_tb()}")
+            return self._fail(f"预览失败：{exc}", 500)
+        elapsed = time.time() - started
+        groups = sum(len(p["groups"]) for p in plan["plans"])
+        merges = sum(len(g["merge"]) for p in plan["plans"] for g in p["groups"])
+        logger.info(
+            f"[hermes_fleet] 整理预览完成：{pid}，{plan['scopes']} 个作用域 → "
+            f"{groups} 组 / {merges} 条可并，用时 {elapsed:.1f}s（未写库）")
+        return json_response({
+            "platform_id": pid,
+            "scopes": plan["scopes"],
+            "plans": plan["plans"],
+            "groups": groups,
+            "merges": merges,
+            "elapsed_ms": int(elapsed * 1000),
+            "log": [
+                f"检查 {plan['scopes']} 个达到阈值的作用域",
+                f"模型给出 {groups} 组合并建议（共 {merges} 条会被并掉）",
+                f"用时 {elapsed:.1f}s；预览不写库",
+            ],
+        })
+
+    async def action_consolidate(self):
+        """真实执行一轮整理：与预览共用判断，只有这一步写库。"""
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        db, err = self._db_of(pid)
+        if err is not None:
+            return err
+        started = time.time()
+        logger.info(f"[hermes_fleet] 手动整理开始：{pid}")
+        try:
+            outcome = await self.plugin.consolidator.run_bot(
+                self.plugin.svc.bot_of(pid), memories=db.memories, force=True)
+        except Exception:
+            logger.error(f"[hermes_fleet] 账号 {pid} 手动整理失败：\n{_tb()}")
+            return self._fail("整理失败，详见插件日志", 500)
+        elapsed = time.time() - started
+        logger.info(
+            f"[hermes_fleet] 手动整理完成：{pid}，{outcome}，用时 {elapsed:.1f}s")
+        return json_response({
+            "result": str(outcome),
+            "merged": int(getattr(outcome, "merged", 0) or 0),
+            "groups": int(getattr(outcome, "groups", 0) or 0),
+            "scopes": int(getattr(outcome, "scopes_done", 0) or 0),
+            "elapsed_ms": int(elapsed * 1000),
+            "log": [
+                f"处理 {getattr(outcome, 'scopes_done', 0)} 个作用域",
+                f"合并 {getattr(outcome, 'merged', 0)} 条记忆"
+                f"（{getattr(outcome, 'groups', 0)} 组）",
+                f"用时 {elapsed:.1f}s",
+            ],
         })
 
     async def memory_import(self):

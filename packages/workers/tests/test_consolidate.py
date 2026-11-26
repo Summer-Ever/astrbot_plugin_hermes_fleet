@@ -85,6 +85,25 @@ class Base(unittest.IsolatedAsyncioTestCase):
         return await self.db.memories.list_active(key or self.key, limit=100)
 
 
+class TestPreview(Base):
+    async def test_预览只给建议不写库(self) -> None:
+        """预览和执行共用 `_decide()`：看到的组就是执行时会处理的组。"""
+        ids = await self.seed("用户喜欢喝乌龙茶，尤其偏爱铁观音", "用户喜欢喝乌龙茶")
+        llm = FakeLlm(json.dumps([
+            {"keep": ids[0], "merge": [ids[1]], "content": "用户喜欢喝乌龙茶"},
+        ]))
+        plan = await self.worker(llm, min_active=2).preview_bot(
+            self.BOT, memories=self.db.memories)
+        self.assertEqual(plan["scopes"], 1)
+        groups = plan["plans"][0]["groups"]
+        self.assertEqual(len(groups), 1, plan)
+        self.assertEqual(groups[0]["keep"]["id"], ids[0])
+        self.assertEqual([m["id"] for m in groups[0]["merge"]], [ids[1]])
+        self.assertEqual(groups[0]["content"], "用户喜欢喝乌龙茶")
+        # 预览不写库：两条都还活跃
+        self.assertEqual(len(await self.active()), 2)
+
+
 class TestPairing(unittest.TestCase):
     """配对是召回：宁可多配，让模型否掉。"""
 

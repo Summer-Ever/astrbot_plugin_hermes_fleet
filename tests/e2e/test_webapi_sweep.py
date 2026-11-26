@@ -1,4 +1,4 @@
-"""管理台路由扫雷：28 条接口逐条真调用，不允许未捕获异常或 500。
+"""管理台路由扫雷：31 条接口逐条真调用，不允许未捕获异常或 500。
 
 为什么值得单独一层：`webapi.py` 是「页面点了没反应」的高发区，而它的
 单元测试（`console` / `admin`）只测纯逻辑，测不到「handler 名称写错、
@@ -37,7 +37,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         load_main()
 
     async def asyncSetUp(self) -> None:
-        # 28 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
+        # 31 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
         # 这不是卡顿，调高阈值免得每次 CI 都刷一条误导性的告警。
         asyncio.get_running_loop().slow_callback_duration = 5.0
         self.env = PluginEnv()
@@ -48,7 +48,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def test_空参数逐条调用不崩(self) -> None:
-        self.assertEqual(len(self.routes), 28, f"路由变了：{sorted(self.routes)}")
+        self.assertEqual(len(self.routes), 31, f"路由变了：{sorted(self.routes)}")
 
         failures: list[str] = []
         for route in sorted(self.routes):
@@ -205,6 +205,33 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         res = await self.routes[f"{PREFIX}/actions/summarize"]["handler"]()
         self.assertEqual(res["status"], 200, res)
         self.assertGreaterEqual(res["data"]["messages"], 1, res)
+
+    async def test_总结与整理预览只读且可确认(self) -> None:
+        """预览必须真的调模型，但不能写库/标记，确认按钮才写。"""
+        ev = self.env.event(message="我下周三搬家")
+        await self.env.turn(ev, "我下周三搬家", "好的")
+
+        web_request.reset(payload={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/actions/summarize/preview"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertGreaterEqual(res["data"]["messages"], 1, res)
+        self.assertTrue(res["data"]["log"], "预览要把过程交回页面")
+
+        # 预览不标记：未总结视图仍然有这批消息。
+        web_request.reset(query={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/messages"]["handler"]()
+        self.assertTrue(res["data"], "预览后消息不该被标记为已总结")
+
+        web_request.reset(payload={"platform_id": "qq-01"})
+        res = await self.routes[
+            f"{PREFIX}/actions/consolidate/preview"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIn("plans", res["data"])
+
+        web_request.reset(payload={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/actions/consolidate"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIn("result", res["data"])
 
 
 if __name__ == "__main__":
