@@ -74,6 +74,11 @@ class TestCommandContract(unittest.TestCase):
     def test_总结指令改名为消息总结为记忆且保留旧名(self) -> None:
         """改名不能让习惯 `/fleet 总结` 的人突然失效。"""
         self.assertIn('@fleet.command("消息总结为记忆", alias={"总结"})', MAIN)
+        # 但绝不能注册成裸指令：群里有人说「总结一下」不该触发总结。
+        # 组内注册后完整指令名是「fleet 消息总结为记忆」/「fleet 总结」，
+        # 必须带前缀才会命中。
+        self.assertNotIn('@filter.command("总结"', MAIN)
+        self.assertNotIn('@filter.command("消息总结为记忆"', MAIN)
 
     def test_提取常驻记忆两个入口共用一条流程(self) -> None:
         self.assertIn('@filter.command("提取常驻记忆")', MAIN)
