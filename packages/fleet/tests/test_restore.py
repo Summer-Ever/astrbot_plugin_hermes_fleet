@@ -126,6 +126,12 @@ class BackupV2Test(unittest.TestCase):
             backup_bots(root=self.root, out_dir=self.out, keep=10)
         self.assertEqual(len(list_backups(self.out)), 10)
 
+    def test_打包后不留临时库与旁路文件(self):
+        """备份目录只能留下 zip：临时库的 `-wal`/`-shm` 不清会一次攒 32 KB。"""
+        backup_bots(root=self.root, out_dir=self.out)
+        names = os.listdir(self.out)
+        self.assertEqual([n for n in names if n.startswith("tmp")], [], names)
+
 
 class RestoreTest(unittest.TestCase):
     def setUp(self):

@@ -364,11 +364,15 @@ def backup_bots(*, root: str, out_dir: str, version: str = "",
         raise
     finally:
         for tmp in temp_files:
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
+            # 快照库是从 WAL 模式的源库逐页复制的，文件头也带着 WAL 标志，
+            # 一打开就会生成 `-wal`/`-shm` 旁路文件。只删主文件会让它们
+            # 永远留在备份目录里（每份 32 KB），跑一次备份/恢复攒一份。
+            for path in (tmp, tmp + "-wal", tmp + "-shm", tmp + "-journal"):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
 
 
 __all__ = [
