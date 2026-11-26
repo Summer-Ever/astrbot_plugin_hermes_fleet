@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
+import time
 import unittest
 import zipfile
 from dataclasses import replace
@@ -160,6 +162,32 @@ class TestVectorGlue(Base):
         for text in texts:
             out.append(await svc.save(scene, text))
         return out
+
+    async def test_查询超预算时降级为字面(self) -> None:
+        """模型再慢也只能拖住检索一个预算窗口，不能拖住整轮对话。"""
+        svc = MemoryService(self.reg)
+        scene = await self.scene()
+        await self.seed(svc, scene, ["用户养了两只布偶猫"])
+
+        class Slow(FakeEmbedder):
+            async def embed(self, texts):
+                await asyncio.sleep(0.3)
+                return [self.vec(t) for t in texts]
+
+        glue = VectorGlue(self.reg, self.settings(query_timeout_s=0.05),
+                          embedder=Slow())
+        try:
+            await glue.sync_bot("qq-01")
+            self.assertEqual((await glue.status("qq-01"))["indexed"], 1)
+
+            t0 = time.perf_counter()
+            hits = await glue.semantic_hits(scene, "宠物", limit=3)
+            elapsed = time.perf_counter() - t0
+        finally:
+            glue.close()
+        self.assertEqual(hits, [], "超预算时少补几条，而不是等模型算完")
+        self.assertLess(elapsed, 0.25)
+        self.assertGreaterEqual(glue.stats["timeouts"], 1)
 
     async def test_增量索引_改写_合并(self) -> None:
         svc = MemoryService(self.reg)

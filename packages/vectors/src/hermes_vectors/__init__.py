@@ -5,6 +5,7 @@
     core.py      归一化 / float32 编码 / 精确内积 top-k（numpy 可选加速）
     store.py     每账号一个 `vectors.db`，只存 id → 向量，不是真相
     embedding.py OpenAI 兼容 `/embeddings` 的批量客户端
+    batching.py  查询向量化的有界队列 + 合批 + 超时降级
 
 设计边界（与 `docs/06` 的评测保持一致）：
 
@@ -16,6 +17,7 @@
 
 from __future__ import annotations
 
+from .batching import BatchingEmbedder, EmbeddingQueueFull, EmbeddingTimeout
 from .core import (
     content_hash,
     cosine,
@@ -35,6 +37,9 @@ from .embedding import (
 from .store import VECTOR_DB_FILE, SqliteVectorStore, VectorRow
 
 __all__ = [
+    "BatchingEmbedder",
+    "EmbeddingQueueFull",
+    "EmbeddingTimeout",
     "content_hash",
     "cosine",
     "dim_of",

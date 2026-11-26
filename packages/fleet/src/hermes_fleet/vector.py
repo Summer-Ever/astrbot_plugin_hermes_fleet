@@ -29,9 +29,12 @@ from dataclasses import dataclass
 from hermes_contracts import RecallHit
 from hermes_vectors import (
     VECTOR_DB_FILE,
+    BatchingEmbedder,
     EmbeddingClient,
     EmbeddingConfig,
     EmbeddingError,
+    EmbeddingQueueFull,
+    EmbeddingTimeout,
     SqliteVectorStore,
     VectorRow,
     content_hash,
@@ -53,6 +56,11 @@ _MAX_OPEN_STORES = 6
 # 扫 2048 条（高维模型下再小的预算也扫不了几条，至少保证窗口有意义）。
 _PURE_PY_OP_BUDGET = 500_000
 _PURE_PY_MAX_ROWS = 2048
+# 查询向量化的合批参数。窗口 10ms：够把同一瞬间涌入的十几个检索并成一批，
+# 又小到用户感知不到；队列 256：满了就放弃语义补充，内存不随并发增长。
+_BATCH_WINDOW_S = 0.01
+_MAX_PENDING_QUERIES = 256
+_BATCH_WORKERS = 2
 
 
 def _as_int(raw: object, default: int, *, low: int = 0,
@@ -86,6 +94,9 @@ class VectorSettings:
     sync_bots: int = 20
     sync_batch: int = 256
     min_score: float = 0.35
+    # 单次检索愿意为「问句变向量」等多久。超时只是少补几条语义记忆，
+    # 不影响字面召回；本地模型可调到 0.2，云端接口留 2 秒。
+    query_timeout_s: float = 2.0
 
     def __post_init__(self) -> None:
         provider = str(self.provider or "off").strip().lower()
@@ -100,6 +111,8 @@ class VectorSettings:
         object.__setattr__(self, "sync_bots", _as_int(self.sync_bots, 20, low=1, high=200))
         object.__setattr__(self, "sync_batch", _as_int(self.sync_batch, 256, low=1, high=2000))
         object.__setattr__(self, "min_score", _as_float(self.min_score, 0.35, low=0.0, high=1.0))
+        object.__setattr__(self, "query_timeout_s",
+                           _as_float(self.query_timeout_s, 2.0, low=0.05, high=30.0))
 
     @classmethod
     def from_config(cls, get: Callable[[str, object], object]) -> "VectorSettings":
@@ -124,6 +137,7 @@ class VectorSettings:
             sync_bots=value("vector_sync_bots", 20),
             sync_batch=value("vector_sync_batch", 256),
             min_score=value("vector_min_score", 0.35),
+            query_timeout_s=value("vector_query_timeout_seconds", 2.0),
         )
 
     @property
@@ -157,9 +171,11 @@ class VectorGlue:
         # 偶发的 `Cannot operate on a closed database`。
         self._inflight: dict[str, int] = {}
         self._qcache: dict[str, tuple[float, list[float]]] = {}
+        self._batch: BatchingEmbedder | None = None
         self._cursor = 0
         self.last_error = ""
-        self.stats = {"queries": 0, "filled": 0, "fallbacks": 0, "indexed": 0}
+        self.stats = {"queries": 0, "filled": 0, "fallbacks": 0, "indexed": 0,
+                      "timeouts": 0, "shed": 0}
 
     # ------------------------------------------------------------ 状态
 
@@ -265,6 +281,8 @@ class VectorGlue:
             "pending": 0,
             "last_sync_ts": 0.0,
             "last_error": self.last_error,
+            "stats": dict(self.stats),
+            "query_timeout_s": self.settings.query_timeout_s,
         }
         if layout != "v2":
             return out
@@ -316,6 +334,18 @@ class VectorGlue:
         d = max(1, int(dim or 256))
         return max(128, min(_PURE_PY_MAX_ROWS, _PURE_PY_OP_BUDGET // d))
 
+    def _batcher(self) -> BatchingEmbedder:
+        """查询侧统一走队列；索引侧的批量调用仍直连 embedder。"""
+        if self._batch is None:
+            self._batch = BatchingEmbedder(
+                self._embedder,
+                batch_size=self.settings.batch_size,
+                window_s=_BATCH_WINDOW_S,
+                max_pending=_MAX_PENDING_QUERIES,
+                workers=_BATCH_WORKERS,
+            )
+        return self._batch
+
     async def _query_vector(self, text: str) -> list[float]:
         key = str(text or "").strip()
         if not key or not self.enabled:
@@ -325,7 +355,18 @@ class VectorGlue:
         if hit is not None and now - hit[0] < QUERY_TTL:
             return hit[1]
         try:
-            vec = await self._embedder.embed_one(key)
+            # 走有界队列：同一瞬间的几十个检索会被合并成一批，
+            # 并且每个请求最多等 query_timeout_s，超了就少补几条。
+            vec = await self._batcher().embed_one(
+                key, budget_s=self.settings.query_timeout_s)
+        except EmbeddingTimeout as exc:
+            self.last_error = str(exc)
+            self.stats["timeouts"] += 1
+            return []
+        except EmbeddingQueueFull as exc:
+            self.last_error = str(exc)
+            self.stats["shed"] += 1
+            return []
         except EmbeddingError as exc:
             self.last_error = str(exc)
             self.stats["fallbacks"] += 1
@@ -610,6 +651,9 @@ class VectorGlue:
         return {"cleared": True, "indexed": 0, "message": "向量索引已清空"}
 
     def close(self) -> None:
+        if self._batch is not None:
+            self._batch.close_nowait()
+            self._batch = None
         for _pid, store in list(self._stores.items()):
             try:
                 store.close()

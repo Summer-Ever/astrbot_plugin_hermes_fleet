@@ -5,15 +5,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
+import time
 import unittest
 
 from hermes_vectors import (
+    BatchingEmbedder,
     EmbeddingClient,
     EmbeddingConfig,
     EmbeddingError,
+    EmbeddingQueueFull,
+    EmbeddingTimeout,
     SqliteVectorStore,
     VectorRow,
     content_hash,
@@ -230,6 +235,86 @@ class TestEmbeddingClient(unittest.IsolatedAsyncioTestCase):
             "https://x/v1/embeddings",
         )
         self.assertFalse(EmbeddingConfig(base_url="https://x/v1").enabled)
+
+
+class _RecordingClient:
+    """记录每次收到的批量，可选注入延迟 / 故障。"""
+
+    def __init__(self, *, delay: float = 0.0,
+                 error: Exception | None = None) -> None:
+        self.delay = delay
+        self.error = error
+        self.batches: list[list[str]] = []
+
+    async def embed(self, texts):
+        self.batches.append(list(texts))
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        return [normalize([float(len(t) or 1), 1.0, 0.0]) for t in texts]
+
+    async def embed_one(self, text):
+        return (await self.embed([text]))[0]
+
+
+class TestBatchingEmbedder(unittest.IsolatedAsyncioTestCase):
+    """排队合批的三条边界：合批、有界、有预算。"""
+
+    async def test_并发查询合并成一批(self) -> None:
+        client = _RecordingClient()
+        emb = BatchingEmbedder(client, batch_size=8, window_s=0.05)
+        texts = [f"查询{i}" for i in range(6)]
+        rows = await asyncio.gather(*(emb.embed_one(t) for t in texts))
+        await emb.aclose()
+        self.assertEqual(len(client.batches), 1, "同一瞬间的检索应该并成一批")
+        self.assertEqual(sorted(client.batches[0]), sorted(texts))
+        self.assertEqual([len(r) for r in rows], [3] * 6)
+
+    async def test_同批重复文本只算一次(self) -> None:
+        client = _RecordingClient()
+        emb = BatchingEmbedder(client, batch_size=8, window_s=0.05)
+        rows = await asyncio.gather(*(emb.embed_one("同一句") for _ in range(3)),
+                                    emb.embed_one("另一句"))
+        await emb.aclose()
+        self.assertEqual(sorted(client.batches[0]), ["另一句", "同一句"])
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[0], rows[2], "重复查询应广播同一份向量")
+
+    async def test_队列满时立刻失败(self) -> None:
+        client = _RecordingClient(delay=0.2)
+        emb = BatchingEmbedder(client, batch_size=1, max_pending=1, workers=1)
+        tasks = [asyncio.create_task(emb.embed_one(f"q{i}")) for i in range(4)]
+        await asyncio.sleep(0.01)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        await emb.aclose()
+        self.assertTrue(any(isinstance(r, EmbeddingQueueFull) for r in results),
+                        "队列满必须立刻拒绝，而不是无限积压")
+
+    async def test_超预算立刻降级(self) -> None:
+        client = _RecordingClient(delay=0.3)
+        emb = BatchingEmbedder(client, batch_size=1, window_s=0.0)
+        t0 = time.perf_counter()
+        with self.assertRaises(EmbeddingTimeout):
+            await emb.embed_one("慢查询", budget_s=0.02)
+        elapsed = time.perf_counter() - t0
+        await emb.aclose()
+        self.assertLess(elapsed, 0.25, "超预算要立刻返回，不能等模型算完")
+
+    async def test_底层失败传给所有等待者(self) -> None:
+        client = _RecordingClient(error=EmbeddingError("boom"))
+        emb = BatchingEmbedder(client, batch_size=4, window_s=0.05)
+        results = await asyncio.gather(*(emb.embed_one(f"q{i}") for i in range(3)),
+                                       return_exceptions=True)
+        await emb.aclose()
+        self.assertTrue(all(isinstance(r, EmbeddingError) for r in results))
+
+    async def test_批量接口直通不排队(self) -> None:
+        client = _RecordingClient()
+        emb = BatchingEmbedder(client, batch_size=8)
+        rows = await emb.embed(["a", "b"])
+        self.assertEqual(client.batches, [["a", "b"]])
+        self.assertEqual(len(rows), 2)
 
 
 if __name__ == "__main__":
