@@ -46,6 +46,7 @@
     busy: false,
     resOwner: "",
     resScope: "private",
+    resLimits: null,
     loadedTabs: {},
     importFile: null,
     overrides: {},
@@ -479,6 +480,39 @@
     scopeSel.value = st.resScope;
   }
 
+  function renderLimits() {
+    const lim = st.resLimits || {};
+    if (lim.block_max_chars) $("lim-block").value = lim.block_max_chars;
+    if (lim.intimacy_max_chars) $("lim-intimacy").value = lim.intimacy_max_chars;
+  }
+
+  async function saveLimits() {
+    const blockMax = Number($("lim-block").value);
+    const intimacyMax = Number($("lim-intimacy").value);
+    if (!Number.isInteger(blockMax) || !Number.isInteger(intimacyMax)) {
+      toast("字数上限必须是整数", true);
+      return;
+    }
+    const btn = $("btn-lim-save");
+    btn.disabled = true;
+    try {
+      st.resLimits = await apiPost("resident/limits", {
+        block_max_chars: blockMax,
+        intimacy_max_chars: intimacyMax,
+      });
+      renderLimits();
+      renderResident(
+        Object.fromEntries(Array.from(
+          document.querySelectorAll("#res-grid .res-text"))
+          .map((ta) => [ta.dataset.block, ta.value])));
+      toast("字数上限已保存，立即生效");
+    } catch (err) {
+      toast("保存上限失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   function renderResident(values) {
     const grid = $("res-grid");
     clear(grid);
@@ -486,6 +520,9 @@
       const box = el("div", "res-block");
       const head = el("div", "res-head");
       head.appendChild(el("b", "", label));
+      const lim = st.resLimits || {};
+      const cap = key === "intimacy" ? lim.intimacy_max_chars : lim.block_max_chars;
+      if (cap) head.appendChild(el("span", "badge muted", "上限 " + cap + " 字"));
       head.appendChild(el("span", "hint", hint));
       box.appendChild(head);
 
@@ -976,6 +1013,7 @@
       st.resScope = "private";
       st.importFile = null;
       st.overrides = {};
+      st.resLimits = null;
       $("mem-q").value = "";
       $("import-file").value = "";
       $("import-owner").value = "";
@@ -999,6 +1037,8 @@
       st.stats = d.stats || null;
       st.note = d.note || "";
       st.overrides = d.overrides || {};
+      st.resLimits = d.resident_limits || st.resLimits;
+      renderLimits();
       st.file = (d.file || "").replace(/\.db$/, "") || st.file || "";
       renderHead();
     } catch (err) {
@@ -1021,6 +1061,7 @@
     $("btn-scopes").addEventListener("click", () => { loadScopes(); });
     $("btn-res-load").addEventListener("click", loadResident);
     $("btn-res-save").addEventListener("click", saveResident);
+    $("btn-lim-save").addEventListener("click", saveLimits);
     $("btn-msg").addEventListener("click", loadMessages);
     $("btn-summarize").addEventListener("click", runSummarize);
     $("btn-ov-save").addEventListener("click", saveOverrides);

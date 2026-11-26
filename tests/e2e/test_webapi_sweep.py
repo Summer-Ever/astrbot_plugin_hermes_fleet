@@ -1,4 +1,4 @@
-"""管理台路由扫雷：31 条接口逐条真调用，不允许未捕获异常或 500。
+"""管理台路由扫雷：32 条接口逐条真调用，不允许未捕获异常或 500。
 
 为什么值得单独一层：`webapi.py` 是「页面点了没反应」的高发区，而它的
 单元测试（`console` / `admin`）只测纯逻辑，测不到「handler 名称写错、
@@ -37,7 +37,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         load_main()
 
     async def asyncSetUp(self) -> None:
-        # 31 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
+        # 32 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
         # 这不是卡顿，调高阈值免得每次 CI 都刷一条误导性的告警。
         asyncio.get_running_loop().slow_callback_duration = 5.0
         self.env = PluginEnv()
@@ -48,7 +48,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def test_空参数逐条调用不崩(self) -> None:
-        self.assertEqual(len(self.routes), 31, f"路由变了：{sorted(self.routes)}")
+        self.assertEqual(len(self.routes), 32, f"路由变了：{sorted(self.routes)}")
 
         failures: list[str] = []
         for route in sorted(self.routes):
@@ -268,6 +268,35 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不由你维护", msg)
         snapshot = await self.env.plugin.svc.resident_snapshot(scene)
         self.assertIn("宝贝", snapshot.get("intimacy", ""), "AI 不能覆盖")
+
+    async def test_常驻字数上限可改且立即生效(self) -> None:
+        """改的是写入口径：保存后马上按新上限校验，不用重载插件。"""
+        ev = self.env.event(message="你好")
+        await self.env.turn(ev, "你好")
+
+        web_request.reset(payload={
+            "block_max_chars": 1200, "intimacy_max_chars": 3500,
+        })
+        res = await self.routes[f"{PREFIX}/resident/limits"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertEqual(res["data"]["intimacy_max_chars"], 3500)
+
+        save = f"{PREFIX}/resident/save"
+        base = {"platform_id": "qq-01", "owner_id": "u1", "scope": "private"}
+        web_request.reset(payload={**base, "block": "intimacy", "text": "啊" * 3200})
+        res = await self.routes[save]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+
+        web_request.reset(payload={**base, "block": "address", "text": "嗯" * 1300})
+        res = await self.routes[save]["handler"]()
+        self.assertEqual(res["status"], 400, f"普通词条应受 1200 约束：{res}")
+
+        # 超出契约硬上限的设置必须被拒
+        web_request.reset(payload={
+            "block_max_chars": 99999, "intimacy_max_chars": 3000,
+        })
+        res = await self.routes[f"{PREFIX}/resident/limits"]["handler"]()
+        self.assertEqual(res["status"], 400, res)
 
 
 if __name__ == "__main__":

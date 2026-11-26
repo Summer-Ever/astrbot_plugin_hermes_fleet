@@ -167,6 +167,18 @@
 
         <!-- 常驻 -->
         <div class="tab-pane hidden" id="pane-resident">
+          <div class="res-limits">
+            <label>普通词条上限
+              <input class="input tiny-input" id="lim-block" type="number"
+                     min="100" max="10000" step="100" />
+            </label>
+            <label>亲密关系上限
+              <input class="input tiny-input" id="lim-intimacy" type="number"
+                     min="100" max="10000" step="100" />
+            </label>
+            <button class="btn ghost" id="btn-lim-save">保存上限</button>
+            <span class="hint" id="lim-hint">只限制「写入」；已存内容不会被截断</span>
+          </div>
           <div class="toolbar">
             <select class="input" id="res-owner"></select>
             <select class="input" id="res-scope"></select>

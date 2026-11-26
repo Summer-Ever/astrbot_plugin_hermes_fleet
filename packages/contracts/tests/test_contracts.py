@@ -244,23 +244,24 @@ class TestResidentBlocks(unittest.TestCase):
     def test_ordered_covers_all(self) -> None:
         self.assertEqual(set(ResidentBlock.ordered()), set(ResidentBlock))
 
-    def test_intimacy_limit_is_3000(self) -> None:
-        """亲密关系是用户自己写的长文本，单独放宽到 3000；其余仍是 2000。"""
-        from hermes_contracts import MAX_INTIMACY_BLOCK_CHARS, ResidentEntry
+    def test_intimacy_default_limit_is_3000(self) -> None:
+        """2000/3000 是默认值；契约层只挡失控输入，实际写入由配置校验。"""
+        from hermes_contracts import (
+            MAX_INTIMACY_BLOCK_CHARS,
+            MAX_RESIDENT_HARD_CAP,
+            ResidentEntry,
+        )
 
         scope = ResidentScope.for_private()
         made = ResidentEntry(
             bot_id=BotId("b"), owner_id=OwnerId("u"), scope=scope,
-            block=ResidentBlock.INTIMACY, text="啊" * 3_000)
-        self.assertEqual(len(made.text), 3_000)
+            block=ResidentBlock.INTIMACY, text="啊" * 3_001)
+        self.assertEqual(len(made.text), 3_001, "契约层允许配置上调到 3000 以上")
         with self.assertRaises(ValueError):
             ResidentEntry(
                 bot_id=BotId("b"), owner_id=OwnerId("u"), scope=scope,
-                block=ResidentBlock.INTIMACY, text="啊" * 3_001)
-        with self.assertRaises(ValueError):
-            ResidentEntry(
-                bot_id=BotId("b"), owner_id=OwnerId("u"), scope=scope,
-                block=ResidentBlock.USER, text="啊" * 2_001)
+                block=ResidentBlock.USER,
+                text="啊" * (MAX_RESIDENT_HARD_CAP + 1))
         self.assertEqual(MAX_INTIMACY_BLOCK_CHARS, 3_000)
 
 

@@ -17,7 +17,8 @@ from typing import Any
 # 这样以后加配置项忘了归类也只是排到末尾，而不是在页面上消失。
 GROUPS: list[tuple[str, list[str]]] = [
     ("记忆注入", ["memory_injection", "inject_to_system_prompt", "capture_messages",
-                  "recall_k", "group_private_memory"]),
+                  "recall_k", "group_private_memory",
+                  "resident_block_max_chars", "resident_intimacy_max_chars"]),
     ("存储与容量", ["bot_db_dir", "max_open_bots", "account_stale_days"]),
     ("后台总结", ["summarize_enabled", "summarize_interval_minutes",
                   "summarize_min_messages", "summarize_idle_hours",

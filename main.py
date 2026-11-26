@@ -306,6 +306,7 @@ class HermesFleet(Star):
             # 检索与群聊可见性按账号覆盖：bot.json 里有值就用它，否则跟随
             # 上面的全局配置。解析器是纯读，registry 内部有 meta 缓存。
             overrides_of=self.registry.overrides_of,
+            block_limits_of=self._resident_limit,
         )
         self._inject_guard: dict[str, float] = {}
         self.provider = self._new_fallback()
@@ -463,6 +464,29 @@ class HermesFleet(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         head = umo.split(":", 1)[0].strip()
         return head or "default"
+
+    def _resident_limit(self, block: str) -> int:
+        """按配置解析词条字数上限；配置缺失或非法时回落到契约默认值。
+
+        上限是「写入口径」，不是注入预算：超限的文本根本写不进库，
+        所以注入时不需要再截断。
+        """
+        from hermes_contracts import MAX_RESIDENT_HARD_CAP, max_chars_for
+        from hermes_contracts.ids import ResidentBlock
+
+        try:
+            target = ResidentBlock(str(block))
+        except ValueError:
+            target = ResidentBlock.USER
+        default = max_chars_for(target)
+        key = ("resident_intimacy_max_chars"
+               if target is ResidentBlock.INTIMACY
+               else "resident_block_max_chars")
+        try:
+            value = int(self._get_cfg(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(100, min(MAX_RESIDENT_HARD_CAP, value))
 
     def _bot_flag(self, platform_id: str, key: str, default: bool) -> bool:
         """该账号的开关：`bot.json` 里有显式值就用它，否则跟随全局。
@@ -874,7 +898,7 @@ class HermesFleet(Star):
             return
         yield event.plain_result(
             f"已更新{where}的「亲密关系与情感表达」"
-            f"（{len(entry.text)}/{max_chars_for(ResidentBlock.INTIMACY)} 字），整段覆盖。")
+            f"（{len(entry.text)}/{self._resident_limit('intimacy')} 字），整段覆盖。")
 
     async def _resident_prompt_flow(self, event: AstrMessageEvent):
         """导出注入块原文，不改写、不摘要。

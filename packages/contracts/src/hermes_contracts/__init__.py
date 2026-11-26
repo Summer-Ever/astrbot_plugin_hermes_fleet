@@ -52,6 +52,7 @@ from .models import (
     MAX_MEMORY_CHARS,
     MAX_MESSAGE_CHARS,
     MAX_RESIDENT_BLOCK_CHARS,
+    MAX_RESIDENT_HARD_CAP,
     Bot,
     ChatMessage,
     Identity,
@@ -135,6 +136,7 @@ __all__ = [
     "MAX_MEMORY_CHARS",
     "MAX_RESIDENT_BLOCK_CHARS",
     "MAX_INTIMACY_BLOCK_CHARS",
+    "MAX_RESIDENT_HARD_CAP",
     "max_chars_for",
     # ports
     "MemoryStore",

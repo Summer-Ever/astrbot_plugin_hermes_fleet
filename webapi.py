@@ -75,6 +75,8 @@ class FleetWebAPI:
              "某用户某场景的六个常驻词条"),
             (f"{self.prefix}/resident/save", self.resident_save, ["POST"],
              "整段覆盖一个常驻词条"),
+            (f"{self.prefix}/resident/limits", self.resident_limits, ["POST"],
+             "保存常驻词条字数上限（普通 / 亲密关系），立即生效"),
             (f"{self.prefix}/messages", self.messages, ["GET"],
              "未总结消息，按会话分组"),
             (f"{self.prefix}/actions/summarize", self.action_summarize, ["POST"],
@@ -150,6 +152,28 @@ class FleetWebAPI:
         except Exception:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _resident_limits(self) -> dict:
+        """当前词条字数上限（普通 / 亲密关系）+ 契约硬上限。"""
+        from hermes_contracts import MAX_RESIDENT_HARD_CAP
+
+        def pick(key: str, default: int) -> int:
+            try:
+                value = int(self._cfg(key, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(100, min(MAX_RESIDENT_HARD_CAP, value))
+
+        return {
+            "block_max_chars": pick("resident_block_max_chars", 2000),
+            "intimacy_max_chars": pick("resident_intimacy_max_chars", 3000),
+            "hard_cap": MAX_RESIDENT_HARD_CAP,
+        }
+
+    def _limit_for_block(self, block: object) -> int:
+        limits = self._resident_limits()
+        return (limits["intimacy_max_chars"] if str(block) == "intimacy"
+                else limits["block_max_chars"])
 
     # ------------------------------------------------------------------ 接口
 
@@ -261,6 +285,7 @@ class FleetWebAPI:
             "file": file_name,
             "note": self.plugin.registry.note_of(pid),
             "overrides": self.plugin.registry.overrides_of(pid),
+            "resident_limits": self._resident_limits(),
             "stats": stats,
             "resident": resident,
             "resident_hint": "常驻按「私聊」场景读取；群场景的常驻各自独立，"
@@ -537,12 +562,18 @@ class FleetWebAPI:
         owner_id = str(body.get("owner_id") or "").strip()
         if not owner_id:
             return self._fail("缺少 owner_id")
+        block = str(body.get("block") or "")
+        text = str(body.get("text") or "")
+        limit = self._limit_for_block(block)
+        if len(text) > limit:
+            return self._fail(
+                f"「{block}」超长：{len(text)} 字 > 上限 {limit} 字，请精简后重试")
         try:
             row = await admin.save_resident(
                 db, self.plugin.svc.bot_of(pid), owner_id,
                 str(body.get("scope") or "private"),
-                str(body.get("block") or ""),
-                str(body.get("text") or ""),
+                block,
+                text,
             )
         except ValueError as exc:
             return self._fail(str(exc))
@@ -550,6 +581,36 @@ class FleetWebAPI:
             logger.error(f"[hermes_fleet] 保存 {pid} 常驻失败:\n{_tb()}")
             return self._fail("写入失败，详见插件日志", 500)
         return json_response({"item": row})
+
+    async def resident_limits(self):
+        """保存常驻词条字数上限（管理台「常驻」页）。立即生效，无需重载。"""
+        from hermes_contracts import MAX_RESIDENT_HARD_CAP
+
+        body = await self._body()
+        try:
+            block_max = int(body.get("block_max_chars"))
+            intimacy_max = int(body.get("intimacy_max_chars"))
+        except (TypeError, ValueError):
+            return self._fail("字数上限必须是整数")
+        for label, value in (("普通词条", block_max), ("亲密关系", intimacy_max)):
+            if not 100 <= value <= MAX_RESIDENT_HARD_CAP:
+                return self._fail(
+                    f"{label}上限必须在 100–{MAX_RESIDENT_HARD_CAP} 之间")
+        conf = self.plugin.config
+        if conf is None:
+            return self._fail("插件配置不可用", 500)
+        try:
+            conf.update({
+                "resident_block_max_chars": block_max,
+                "resident_intimacy_max_chars": intimacy_max,
+            })
+            saver = getattr(conf, "save_config_async", None)
+            if saver is not None:
+                await saver()
+        except Exception:
+            logger.error(f"[hermes_fleet] 保存常驻字数上限失败:\n{_tb()}")
+            return self._fail("保存失败，详见插件日志", 500)
+        return json_response(self._resident_limits())
 
     async def messages(self):
         from hermes_fleet import admin

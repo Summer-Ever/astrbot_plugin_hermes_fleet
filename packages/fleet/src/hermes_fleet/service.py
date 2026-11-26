@@ -94,6 +94,7 @@ class MemoryService:
         recall_k: int = 5,
         clock_now=None,
         overrides_of=None,
+        block_limits_of=None,
     ) -> None:
         self.registry = registry
         self.group_private_memory = bool(group_private_memory)
@@ -103,6 +104,18 @@ class MemoryService:
         # 而不是直接调 registry，是为了这层仍然能脱离磁盘测：用例可以塞
         # 一个纯 dict 进来验证「这个号的开关只影响这个号」。
         self._overrides_of = overrides_of
+        # 词条字数上限按配置走（管理台「常驻」页可改）。注入成回调而不是
+        # 直接读插件配置，是为了这一层仍然能脱离 AstrBot 测。
+        self._block_limits_of = block_limits_of
+
+    def _limit_for(self, block) -> int:
+        base = max_chars_for(block)
+        if self._block_limits_of is None:
+            return base
+        try:
+            return int(self._block_limits_of(block.value))
+        except Exception:
+            return base
 
     def _override(self, scene: Scene, key: str):
         if self._overrides_of is None:
@@ -312,7 +325,7 @@ class MemoryService:
                 f"「{label}」词条文本带指令腔（试图改写规则或身份），已拒绝。"
                 "词条记录的是事实与偏好，不是指令。"
             )
-        limit = max_chars_for(target)
+        limit = self._limit_for(target)
         if len(body) > limit:
             raise ValueError(
                 f"「{label}」词条超长：{len(body)} 字 > 上限 "
