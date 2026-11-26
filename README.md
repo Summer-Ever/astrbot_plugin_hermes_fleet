@@ -346,10 +346,16 @@ python benchmarks/bench_fleet_load.py --llm auto \
 # 接真实 embedding（自动探测 OpenAI 兼容端点）
 python benchmarks/bench_fleet_load.py --embed auto \
     --vector-bots 2 --vector-concurrency 6
+
+# 本机 CPU 跑本地模型（transformers + torch，不需要任何外部服务）
+python benchmarks/bench_fleet_load.py --embed local \
+    --vector-bots 2 --vector-concurrency 8 --embed-threads 4
 ```
 
-`--llm fake|auto|off`、`--embed fake|auto|off` 可切换；密钥只用于请求，不写进
-报告。`HERMES_BENCH_LLM_*` / `HERMES_BENCH_EMBED_*` 可覆盖自动探测。
+`--llm fake|auto|off`、`--embed fake|auto|local|off` 可切换；密钥只用于请求，
+不写进报告。`HERMES_BENCH_LLM_*` / `HERMES_BENCH_EMBED_*` 可覆盖自动探测。
+`--embed local` 默认用 `BAAI/bge-small-zh-v1.5`（512 维、24M 参数），首次运行会
+从 HuggingFace 下载约 95MB 权重。
 
 本机实测（单进程、单核）：
 
@@ -359,11 +365,26 @@ python benchmarks/bench_fleet_load.py --embed auto \
 | 1000 用户，1 轮 / 1.5s | 2,171 ops/s | 检索 1.9ms · 落库 0.5ms | 111% | 单核饱和 |
 | 真实 qwen3.7-flash 总结 | — | 25s / 会话 | — | 1 个会话产出 8 条记忆 |
 | 真实 text-embedding-v4 | 5.6 条/秒 | 查询 265ms | 7% | 1024 维，单批上限 10 |
+| 本地 bge-small-zh，100 用户 | 278 ops/s | 检索 10.9ms | 366% | 512 维，RSS 509MB |
+| 本地 bge-small-zh，400 用户 | 1,001 ops/s | 检索 1.1s | 1,070% | CPU 打满，尾部崩 |
+
+本地向量与云端的差别（同一批记忆、12 条改述问句）：
+
+| | 单条延迟 | 索引吞吐 | 召回 top1 / top3 | 内存 |
+|---|---:|---:|---:|---:|
+| 云端 text-embedding-v4（1024 维） | 265ms | 5.6 条/秒 | 11/12 · 11/12 | 0 |
+| 本地 bge-small-zh（512 维，CPU） | 4.9ms | 383 条/秒 | 9/12 · 12/12 | ~460MB |
 
 结论：**记忆插件本身不是瓶颈**（检索与落库都在毫秒内），瓶颈是单进程 CPU
 与 embedding 网络往返。1000 个持续发言的用户会吃满一个核；上千用户应多进程 /
 多 worker 部署。向量检索在字面召回不足时会多一次 embedding 调用（约 250ms），
 只影响模型主动调 `search_memory` 的那一轮，不是每轮对话。
+
+本地向量是「省钱、快、但有硬上限」：单实例 CPU 推理约 200 条/秒（空载），
+在 100 个活跃用户的热路径上仍有余量，到 400 个用户就会把 CPU 吃满、检索尾部
+退化到秒级。所以 CPU 机器上开向量档要按账号限量，成百上千活跃用户请走云端或
+多机分摊。核显并没有优势——短文本下驱动与显存拷贝的开销盖过算力，而且核显
+共享系统内存，内存紧张时只会更容易触发换页。
 
 ## 开发
 

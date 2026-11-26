@@ -59,6 +59,19 @@ class TestBenchHarness(unittest.TestCase):
         norm = sum(x * x for x in rows[0]) ** 0.5
         self.assertAlmostEqual(norm, 1.0, places=5)
 
+    def test_本地向量关掉向量阶段就不加载模型(self) -> None:
+        # 本地模型要 torch + 95MB 权重，没开向量阶段就不该付这份内存。
+        args = BENCH.parse_args(["--embed", "local", "--vector-bots", "0"])
+        embedder, desc = BENCH.make_embedder(args)
+        self.assertIsNone(embedder)
+        self.assertIn("local", desc)
+
+    def test_本地向量参数默认值(self) -> None:
+        args = BENCH.parse_args([])
+        self.assertEqual(args.embed_local_model, "BAAI/bge-small-zh-v1.5")
+        self.assertGreater(args.embed_threads, 0)
+        self.assertLess(args.embed_threads, 16, "别默认占满逻辑核")
+
 
 if __name__ == "__main__":
     unittest.main()

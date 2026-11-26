@@ -36,6 +36,10 @@
     # 接真实 embedding + 向量检索并发
     python benchmarks/bench_fleet_load.py --embed auto --vector-bots 2 --vector-concurrency 20
 
+    # 本机 CPU 跑本地向量模型（transformers + torch，不需要额外服务）
+    python benchmarks/bench_fleet_load.py --embed local --vector-bots 2 \\
+        --vector-concurrency 8 --embed-threads 6
+
     # 更重的混合负载：50 个账号 × 40 用户，阶梯加压
     python benchmarks/bench_fleet_load.py --bots 50 --users-per-bot 40 \\
         --scenario ramp --ramp-seconds 20 --duration 120 --think-ms 2
@@ -557,6 +561,78 @@ class OpenAICompatEmbedder:
         return rows[0] if rows else []
 
 
+class LocalEmbedder:
+    """进程内本地向量模型（transformers + torch，CPU）。
+
+    为什么不是 fastembed/onnxruntime：本机 Python 3.15 上 onnxruntime
+    没有任何轮子，那条路根本装不上。torch 有 cp315 的 Windows CPU 轮子
+    （约 120MB），所以本地推理只能走它。
+
+    线程数与批大小都刻意收着：本机可用内存只有几个 GB，把 16 个逻辑核
+    全交给 torch 只会抬高峰值、抢走压测要用的 CPU，换不来吞吐。模型实例
+    也不并发调用——同一份权重并发跑只会互相争抢，压测要看的是单实例上限。
+    """
+
+    def __init__(self, model: str = "BAAI/bge-small-zh-v1.5", *,
+                 threads: int = 6, batch_size: int = 10) -> None:
+        self.model = model
+        self.threads = max(1, int(threads))
+        self.batch_size = max(1, int(batch_size))
+        self.dim = 0
+        self.calls = 0
+        self.texts = 0
+        self.seconds = 0.0
+        self._torch = None
+        self._tok = None
+        self._net = None
+        # 在事件循环上排队，而不是在线程池里等锁：线程池只有 20 个槽位，
+        # 让等待者占着槽位会把同一条链路上的 SQLite 查询一并堵死，
+        # 表现为「检索 p95 涨到几秒」，实际上模型只花了 5ms。
+        self._alock = asyncio.Lock()
+
+    def _load(self) -> None:
+        if self._net is not None:
+            return
+        import torch  # 惰性导入：跑 fake/off 的压测不该付 torch 的启动成本
+        from transformers import AutoModel, AutoTokenizer
+
+        torch.set_num_threads(self.threads)
+        self._torch = torch
+        self._tok = AutoTokenizer.from_pretrained(self.model)
+        self._net = AutoModel.from_pretrained(self.model).eval()
+
+    def _encode(self, texts: list[str]) -> list[list[float]]:
+        self._load()
+        torch = self._torch
+        with torch.inference_mode():
+            batch = self._tok(texts, padding=True, truncation=True,
+                              max_length=256, return_tensors="pt")
+            hidden = self._net(**batch).last_hidden_state[:, 0]
+            # BGE 系列是 CLS 池化再归一化；与云端接口返回的归一化向量同构，
+            # 否则余弦相似度会被模长干扰。
+            mats = torch.nn.functional.normalize(hidden, p=2, dim=1)
+        return [[float(x) for x in row] for row in mats.tolist()]
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            chunk = texts[start:start + self.batch_size]
+            t0 = time.perf_counter()
+            async with self._alock:
+                rows = await asyncio.to_thread(self._encode, chunk)
+            self.seconds += time.perf_counter() - t0
+            self.calls += 1
+            self.texts += len(chunk)
+            if rows:
+                self.dim = len(rows[0])
+            out.extend(rows)
+        return out
+
+    async def embed_one(self, text: str) -> list[float]:
+        rows = await self.embed([text])
+        return rows[0] if rows else []
+
+
 # ---------------------------------------------------------------------------
 # 指标
 # ---------------------------------------------------------------------------
@@ -860,6 +936,9 @@ class FleetLoad:
     async def isolation_checks(self) -> dict:
         """高并发之后重新验一遍归属：隔离坏了，性能再好也不能用。"""
         out: dict = {}
+        if len(self.bot_ids) < 2:
+            # 单账号没有「跨账号」可比：跳过，别让压测最后一步崩在这里。
+            return {"跨账号": "SKIP（只有 1 个账号）"}
         bot_a, bot_b = self.bot_ids[0], self.bot_ids[1]
         probe = f"隔离探针{int(time.time())}"
 
@@ -1212,14 +1291,20 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--summarize-sessions", type=int, default=2)
     p.add_argument("--summarize-max-tokens", type=int, default=600)
 
-    p.add_argument("--embed", choices=["fake", "auto", "off"], default="fake",
-                   help="向量模型：fake 离线 / auto 探测 / off")
+    p.add_argument("--embed", choices=["fake", "auto", "off", "local"],
+                   default="fake",
+                   help="向量模型：fake 离线 / local 本机 transformers / "
+                        "auto 探测兼容服务 / off")
     p.add_argument("--embed-base-url", default="")
     p.add_argument("--embed-model", default="")
     p.add_argument("--embed-api-key", default="")
     p.add_argument("--embed-batch", type=int, default=10,
                    help="embedding 单批条数（DashScope 上限 10）")
     p.add_argument("--embed-dim", type=int, default=256, help="fake 模型的维度")
+    p.add_argument("--embed-local-model", default="BAAI/bge-small-zh-v1.5",
+                   help="--embed local 用的 HF 模型（默认 512 维中文小模型）")
+    p.add_argument("--embed-threads", type=int, default=6,
+                   help="本地模型的 torch 线程数（别占满，留 CPU 给压测）")
     p.add_argument("--vector-bots", type=int, default=0,
                    help="压测后对多少个账号建索引并做语义检索（0=不跑）")
     p.add_argument("--vector-concurrency", type=int, default=16)
@@ -1261,6 +1346,14 @@ def make_embedder(args) -> tuple[object | None, str]:
         return None, "off"
     if args.embed == "fake":
         return FakeEmbedder(args.embed_dim), f"fake（{args.embed_dim} 维）"
+    if args.embed == "local":
+        if args.vector_bots <= 0:
+            # 没开向量阶段就别加载模型：95MB 权重 + torch 运行时在这个
+            # 内存本就紧张的本机上不值得白占。
+            return None, "local（未启用向量阶段，未加载）"
+        emb = LocalEmbedder(args.embed_local_model, threads=args.embed_threads,
+                            batch_size=args.embed_batch)
+        return emb, f"local {args.embed_local_model}（CPU {args.embed_threads} 线程）"
     if args.vector_bots <= 0:
         # 不做向量阶段就不探测：探测会真的发请求，不该为「只是压测对话」付钱。
         return None, "auto（未启用向量阶段，未探测）"
@@ -1291,6 +1384,13 @@ async def amain(argv: list[str] | None = None) -> int:
 
     llm, llm_desc = make_llm(args)
     embedder, embed_desc = make_embedder(args)
+    if isinstance(embedder, LocalEmbedder):
+        # 首次调用要 import torch 并加载权重（这台机器约 5s）。不预热的话，
+        # 首轮并发检索会全部堵在这一次加载后面，被误读成「p95 七秒」。
+        t0 = time.perf_counter()
+        await embedder.embed(["预热：我平时只喝乌龙茶"])
+        print(f"  本地模型预热：{time.perf_counter() - t0:.1f}s · "
+              f"{embedder.dim} 维 · RSS {rss_mb():.0f}MB")
 
     load = FleetLoad(args, llm, embedder)
     started_at = time.time()
