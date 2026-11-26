@@ -231,11 +231,17 @@ event.get_platform_id()   # -> 面板里给每个适配器配的 id，如 "qq-01
 ## 开发
 
 ```bash
-python run_tests.py            # 全量（127 个用例，零依赖）
-python run_tests.py -p fleet   # 只跑插件层（20 个隔离用例）
+python run_tests.py            # 全量用例（零依赖，含端到端）
+python run_tests.py -p fleet   # 只跑插件层的隔离用例
 python tools/check_boundaries.py   # 依赖方向检查
 python tools/verify.py         # 一键校验（CI 入口）
+python tools/coverage.py       # 覆盖率门槛（需 pip install coverage）
 ```
+
+`tests/e2e/` 用 `tests/harness/` 里的假 AstrBot 运行时把 `main.py` 与
+`webapi.py` **真的跑起来**：金路径（注入→落库→总结→检索→删除）、23 条路由
+逐条空参扫雷、并发隔离 / LRU 换出 / 重启复用。所以「本机没装 AstrBot」不再是
+接入层的测试盲区。
 
 **业务逻辑不 import astrbot。** 所有记忆语义在 `packages/fleet/`，
 `main.py` 只做"取事件字段 → 调 service → 塞回请求"。
