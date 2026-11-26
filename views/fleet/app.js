@@ -435,22 +435,69 @@
   async function downloadBackup(name) {
     const bridge = getBridge();
     if (!bridge || typeof bridge.download !== "function") {
-      toast("当前面板不支持下载，请用文件管理器打开备份目录", true);
+      toast("当前面板不支持下载，请点「打开备份目录」拷走", true);
       return;
     }
     try {
       await bridge.download("backup/download", { filename: name }, name);
+      // 桌面端（Tauri WebView）不一定会弹出下载提示，文件可能已经安静地
+      // 落在下载目录。给一句明确回执，并指一条一定能走通的路。
+      toast("已发起下载：" + name + "。若没反应，请点「打开备份目录」");
     } catch (err) {
-      toast("下载失败：" + errMsg(err), true);
+      toast("下载失败：" + errMsg(err) + "，可点「打开备份目录」拷走", true);
     }
   }
 
-  /** 恢复/回滚共用：输入 RESTORE 二次确认，成功后刷新账号与健康信息。 */
+  // `window.prompt` 在面板里不可用：插件页面跑在沙箱 iframe 里，宿主只给了
+  // `allow-scripts allow-forms allow-downloads`，没有 `allow-modals`——prompt
+  // 会被静默忽略并返回 null，表现就是点「恢复」什么都不发生。所以确认区
+  // 做成页面内元素，不依赖宿主弹窗。
+  let confirmBox = null;
+
+  function clearConfirm() {
+    if (confirmBox && confirmBox.parentNode) {
+      confirmBox.parentNode.removeChild(confirmBox);
+    }
+    confirmBox = null;
+  }
+
+  function askConfirm(endpoint, name, verb) {
+    clearConfirm();
+    const box = el("div", "backup-confirm");
+    box.appendChild(el("p", "dim small",
+      verb + "会覆盖当前全部账号数据：" + name + "。输入 RESTORE 确认："));
+    const input = el("input", "input tiny-input");
+    input.type = "text";
+    input.placeholder = "RESTORE";
+    input.autocomplete = "off";
+    const ok = el("button", "btn tiny danger", verb);
+    ok.disabled = true;
+    const cancel = el("button", "btn tiny ghost", "取消");
+    input.addEventListener("input", () => {
+      ok.disabled = input.value.trim() !== "RESTORE";
+    });
+    cancel.addEventListener("click", clearConfirm);
+    ok.addEventListener("click", () => {
+      clearConfirm();
+      applyBackup(endpoint, name, verb);
+    });
+    const line = el("div", "backup-confirm-line");
+    line.appendChild(input);
+    line.appendChild(ok);
+    line.appendChild(cancel);
+    box.appendChild(line);
+    $("restore-list").appendChild(box);
+    confirmBox = box;
+    try {
+      input.focus();
+      box.scrollIntoView({ block: "nearest" });
+    } catch (_) {
+      /* 老 WebView 不支持 scrollIntoView 参数时忽略 */
+    }
+  }
+
+  /** 恢复/回滚共用：确认后调接口，成功后刷新账号与健康信息。 */
   async function applyBackup(endpoint, name, verb) {
-    const word = window.prompt(
-      verb + "会覆盖当前全部账号数据。\n输入 RESTORE 确认：", "");
-    if (word === null) return;
-    if (word.trim() !== "RESTORE") { toast("未输入 RESTORE，已取消", true); return; }
     try {
       const d = await apiPost(endpoint, { filename: name, confirm: "RESTORE" });
       $("restore-modal").classList.add("hidden");
@@ -464,8 +511,8 @@
     }
   }
 
-  const restoreBackup = (name) => applyBackup("backup/restore", name, "恢复");
-  const rollbackBackup = (name) => applyBackup("backup/rollback", name, "回滚");
+  const restoreBackup = (name) => askConfirm("backup/restore", name, "恢复");
+  const rollbackBackup = (name) => askConfirm("backup/rollback", name, "回滚");
 
   async function probeCurrentPage() {
     const st = state.accounts;
@@ -548,6 +595,8 @@
     $("btn-restore").addEventListener("click", openRestore);
     $("restore-cancel").addEventListener("click",
       () => $("restore-modal").classList.add("hidden"));
+    $("restore-open-dir").addEventListener("click",
+      () => openDir("backups", "备份目录"));
     $("restore-modal").addEventListener("click", (e) => {
       if (e.target === $("restore-modal")) $("restore-modal").classList.add("hidden");
     });

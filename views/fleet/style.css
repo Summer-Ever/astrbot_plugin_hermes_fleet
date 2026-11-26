@@ -505,6 +505,12 @@ button, input, select { font: inherit; color: inherit; }
   flex: 1; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
+.backup-confirm {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border: 1px solid var(--danger); border-radius: 8px;
+}
+.backup-confirm-line { display: flex; align-items: center; gap: 6px; }
+.backup-confirm-line .input { flex: 1; min-width: 0; }
 
 .merge-list { overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .merge-row {
