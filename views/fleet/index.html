@@ -134,6 +134,7 @@
           <button class="tab active" data-tab="memories">记忆</button>
           <button class="tab" data-tab="resident">常驻</button>
           <button class="tab" data-tab="messages">未总结</button>
+          <button class="tab" data-tab="overrides">开关</button>
           <button class="tab" data-tab="actions">操作</button>
         </nav>
 
@@ -185,6 +186,24 @@
             <button class="btn ghost" id="btn-msg">刷新</button>
           </div>
           <div id="msg-list" class="msg-list"></div>
+        </div>
+
+        <!-- 开关 -->
+        <div class="tab-pane hidden" id="pane-overrides">
+          <div class="cards">
+            <div class="card">
+              <h3>本账号开关</h3>
+              <p>默认全部「跟随全局」。这里的设置只作用于这个账号，存在它的
+                bot.json 里；想彻底停掉某个号的记忆，把「记录对话」设为关闭即可
+                （新消息不再入库，已有记忆保留）。</p>
+              <div class="ov-form" id="ov-form"></div>
+              <div class="toolbar right">
+                <button class="btn primary" id="btn-ov-save">保存开关</button>
+              </div>
+              <div class="hint">模型链、并发、间隔、冷却是全局资源，不跟账号拆；
+                改完从下一条消息起生效。</div>
+            </div>
+          </div>
         </div>
 
         <!-- 操作 -->

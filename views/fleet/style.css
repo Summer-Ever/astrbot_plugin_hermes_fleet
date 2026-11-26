@@ -512,6 +512,15 @@ button, input, select { font: inherit; color: inherit; }
 .backup-confirm-line { display: flex; align-items: center; gap: 6px; }
 .backup-confirm-line .input { flex: 1; min-width: 0; }
 
+.ov-form { display: flex; flex-direction: column; gap: 2px; }
+.ov-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 7px 0; border-bottom: 1px dashed var(--border);
+}
+.ov-row:last-child { border-bottom: 0; }
+.ov-row .ov-label { font-size: 13px; }
+.ov-row .input { min-width: 132px; max-width: 160px; }
+
 .merge-list { overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .merge-row {
   display: flex; gap: 8px; align-items: flex-start;

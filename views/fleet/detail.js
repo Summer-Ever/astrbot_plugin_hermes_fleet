@@ -46,6 +46,7 @@
     resScope: "private",
     loadedTabs: {},
     importFile: null,
+    overrides: {},
   };
 
   // 单份导入文件的硬上限，与后端 MAX_EXPORT_BYTES 保持一致（100MB）。
@@ -671,6 +672,82 @@
     }
   }
 
+  // ---------------------------------------------------------------- 开关
+
+  // 只列「策略」类开关：模型链、并发、间隔属于全局资源，按账号拆开会让
+  // 「为什么这个号半夜在跑」无法归因，所以页面上也不给这些项。
+  const OV_BOOLS = [
+    ["capture_messages", "记录对话"],
+    ["summarize_enabled", "后台总结"],
+    ["consolidate_enabled", "记忆整理"],
+    ["group_private_memory", "群内引用私聊记忆"],
+  ];
+  const OV_STATES = [["inherit", "跟随全局"], ["on", "开启"], ["off", "关闭"]];
+
+  function renderOverrides() {
+    const box = $("ov-form");
+    clear(box);
+    OV_BOOLS.forEach(([key, label]) => {
+      const row = el("div", "ov-row");
+      row.appendChild(el("span", "ov-label", label));
+      const sel = el("select", "input");
+      sel.id = "ov-" + key;
+      OV_STATES.forEach(([value, text]) => {
+        const opt = el("option", "", text);
+        opt.value = value;
+        sel.appendChild(opt);
+      });
+      const cur = st.overrides[key];
+      sel.value = cur === undefined ? "inherit" : (cur ? "on" : "off");
+      row.appendChild(sel);
+      box.appendChild(row);
+    });
+
+    const row = el("div", "ov-row");
+    row.appendChild(el("span", "ov-label", "检索条数 recall_k（1–20）"));
+    const rk = el("input", "input");
+    rk.id = "ov-recall_k";
+    rk.type = "number";
+    rk.min = "1";
+    rk.max = "20";
+    rk.placeholder = "跟随全局";
+    if (st.overrides.recall_k !== undefined) rk.value = String(st.overrides.recall_k);
+    row.appendChild(rk);
+    box.appendChild(row);
+  }
+
+  async function saveOverrides() {
+    const updates = {};
+    OV_BOOLS.forEach(([key]) => {
+      const value = $("ov-" + key).value;
+      updates[key] = value === "inherit" ? null : value === "on";
+    });
+    const raw = $("ov-recall_k").value.trim();
+    if (raw === "") {
+      updates.recall_k = null;
+    } else {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 20) {
+        toast("检索条数必须是 1–20 的整数", true);
+        return;
+      }
+      updates.recall_k = n;
+    }
+    const btn = $("btn-ov-save");
+    btn.disabled = true;
+    try {
+      const d = await apiPost("account-overrides",
+        { platform_id: st.pid, overrides: updates });
+      st.overrides = d.overrides || {};
+      renderOverrides();
+      toast("开关已保存，从下一条消息起生效");
+    } catch (err) {
+      toast("保存开关失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // ---------------------------------------------------------------- tab
 
   function switchTab(name) {
@@ -678,9 +755,10 @@
     document.querySelectorAll("#d-tabs .tab").forEach((b) => {
       b.classList.toggle("active", b.dataset.tab === name);
     });
-    ["memories", "resident", "messages", "actions"].forEach((k) => {
+    ["memories", "resident", "messages", "actions", "overrides"].forEach((k) => {
       $("pane-" + k).classList.toggle("hidden", k !== name);
     });
+    if (name === "overrides") renderOverrides();
     if (name === "resident" && !st.loadedTabs.resident) {
       st.loadedTabs.resident = true;
       loadResident();
@@ -706,6 +784,7 @@
       st.resOwner = "";
       st.resScope = "private";
       st.importFile = null;
+      st.overrides = {};
       $("mem-q").value = "";
       $("import-file").value = "";
       $("import-owner").value = "";
@@ -722,6 +801,7 @@
       const d = await apiGet("account", { platform_id: pid });
       st.stats = d.stats || null;
       st.note = d.note || "";
+      st.overrides = d.overrides || {};
       st.file = (d.file || "").replace(/\.db$/, "") || st.file || "";
       renderHead();
     } catch (err) {
@@ -746,6 +826,7 @@
     $("btn-res-save").addEventListener("click", saveResident);
     $("btn-msg").addEventListener("click", loadMessages);
     $("btn-summarize").addEventListener("click", runSummarize);
+    $("btn-ov-save").addEventListener("click", saveOverrides);
     $("import-file").addEventListener("change", onImportPick);
     $("btn-import").addEventListener("click", runImport);
 

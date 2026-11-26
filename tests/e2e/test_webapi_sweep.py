@@ -1,4 +1,4 @@
-"""管理台路由扫雷：27 条接口逐条真调用，不允许未捕获异常或 500。
+"""管理台路由扫雷：28 条接口逐条真调用，不允许未捕获异常或 500。
 
 为什么值得单独一层：`webapi.py` 是「页面点了没反应」的高发区，而它的
 单元测试（`console` / `admin`）只测纯逻辑，测不到「handler 名称写错、
@@ -37,7 +37,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         load_main()
 
     async def asyncSetUp(self) -> None:
-        # 27 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
+        # 28 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
         # 这不是卡顿，调高阈值免得每次 CI 都刷一条误导性的告警。
         asyncio.get_running_loop().slow_callback_duration = 5.0
         self.env = PluginEnv()
@@ -48,7 +48,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def test_空参数逐条调用不崩(self) -> None:
-        self.assertEqual(len(self.routes), 27, f"路由变了：{sorted(self.routes)}")
+        self.assertEqual(len(self.routes), 28, f"路由变了：{sorted(self.routes)}")
 
         failures: list[str] = []
         for route in sorted(self.routes):
@@ -156,6 +156,41 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         res = await self.routes[f"{PREFIX}/account"]["handler"]()
         self.assertEqual(res["status"], 200, res)
         self.assertEqual(res["data"]["platform_id"], "qq-01")
+
+    async def test_按账号开关可保存并在详情里读回(self) -> None:
+        """单个机器人关记忆就靠这条：写入 bot.json，详情页再读回来。"""
+        ev = self.env.event(message="我住在杭州")
+        await self.env.turn(ev, "我住在杭州", "好的")
+
+        route = f"{PREFIX}/account-overrides"
+        web_request.reset(payload={
+            "platform_id": "qq-01",
+            "overrides": {"capture_messages": False, "recall_k": 9},
+        })
+        res = await self.routes[route]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIs(res["data"]["overrides"]["capture_messages"], False)
+        self.assertEqual(res["data"]["overrides"]["recall_k"], 9)
+
+        web_request.reset(query={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/account"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertEqual(res["data"]["overrides"]["recall_k"], 9)
+
+        # null = 删掉这条覆盖，回到「跟随全局」。
+        web_request.reset(payload={
+            "platform_id": "qq-01", "overrides": {"capture_messages": None},
+        })
+        res = await self.routes[route]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertNotIn("capture_messages", res["data"]["overrides"])
+
+        # 全局资源类开关不认识就直接拒，不能静默丢掉。
+        web_request.reset(payload={
+            "platform_id": "qq-01", "overrides": {"llm_provider_ids": "x"},
+        })
+        res = await self.routes[route]["handler"]()
+        self.assertEqual(res["status"], 400, res)
 
 
 if __name__ == "__main__":

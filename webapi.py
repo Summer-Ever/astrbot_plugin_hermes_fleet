@@ -58,6 +58,8 @@ class FleetWebAPI:
              "批量取真实统计（有上限，用完立即关库）"),
             (f"{self.prefix}/notes", self.note_save, ["POST"],
              "给账号起备注（显示用别名，不影响 platform_id 与库文件）"),
+            (f"{self.prefix}/account-overrides", self.overrides_save, ["POST"],
+             "按账号覆盖开关：记录对话 / 总结 / 整理 / 群内私聊记忆 / recall_k"),
             # ---- 下钻页：进去之后才是 hermes_core 那种内容管理 ----
             (f"{self.prefix}/scopes", self.scopes, ["GET"],
              "该账号下的记忆作用域清单（谁、哪个群、各多少条）"),
@@ -250,6 +252,7 @@ class FleetWebAPI:
             "platform_id": pid,
             "file": file_name,
             "note": self.plugin.registry.note_of(pid),
+            "overrides": self.plugin.registry.overrides_of(pid),
             "stats": stats,
             "resident": resident,
             "resident_hint": "常驻按「私聊」场景读取；群场景的常驻各自独立，"
@@ -287,6 +290,31 @@ class FleetWebAPI:
             "note": note,
             "trimmed": raw.strip() != note,
         })
+
+    async def overrides_save(self):
+        """按账号改开关；值为 `null` 表示删掉该覆盖、回到「跟随全局」。
+
+        只收 `OVERRIDE_KEYS` 里的策略开关。模型链、并发、间隔、冷却是全局
+        资源，按账号拆开会让「为什么这个号半夜在跑」无法归因。未知键直接
+        报错而不是忽略：静默丢弃会变成「保存成功但没生效」。
+        """
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        if not pid:
+            return self._fail("缺少 platform_id")
+        raw = body.get("overrides")
+        if not isinstance(raw, dict):
+            return self._fail("overrides 必须是对象")
+        try:
+            merged = self.plugin.registry.set_overrides(pid, raw)
+        except KeyError as exc:
+            return self._fail(str(exc).strip("'"), 404)
+        except ValueError as exc:
+            return self._fail(str(exc))
+        except Exception:
+            logger.error(f"[hermes_fleet] 保存 {pid} 开关失败:\n{_tb()}")
+            return self._fail("写入开关失败，详见插件日志", 500)
+        return json_response({"platform_id": pid, "overrides": merged})
 
     async def probe(self):
         from hermes_fleet.console import merge_probe
