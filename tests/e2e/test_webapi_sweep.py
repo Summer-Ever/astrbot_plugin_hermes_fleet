@@ -233,6 +233,22 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["status"], 200, res)
         self.assertIn("result", res["data"])
 
+    async def test_群聊会出现在群清单与未总结视图里(self) -> None:
+        """群聊常常只有常驻、没有归档记忆：页面必须仍能看见这个群。"""
+        gid = "g-10086"
+        ev = self.env.event(group_id=gid, sender_id="u9", message="记住叫我老王")
+        await self.env.turn(ev, "记住叫我老王", "好的老王")
+
+        web_request.reset(query={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/scopes"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIn(gid, [g["group_id"] for g in res["data"]["groups"]])
+
+        web_request.reset(query={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/messages"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIn(gid, str(res["data"]), "群会话不该在未总结视图里消失")
+
 
 if __name__ == "__main__":
     unittest.main()

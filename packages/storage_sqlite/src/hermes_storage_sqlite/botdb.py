@@ -513,6 +513,36 @@ class SqliteBotDb:
                 pass
             self._conn.close()
 
+    def list_groups(self, bot_id: "BotId | str") -> list[dict]:
+        """该账号见过的群：消息里出现过的 group_id ∪ 群常驻里的群。
+
+        为什么需要：管理台的作用域下拉来自「有活跃归档记忆」的作用域，而群聊
+        往往只有常驻（称呼、群规则）没有归档记忆，于是界面上完全看不到这个群，
+        管理员也就没法查看/编辑群常驻。这里只补「见过哪些群」，不参与注入判断。
+        """
+        bot = str(bot_id or "")
+        with self._lock:
+            rows = self._conn.execute(
+                "select group_id, count(*) from messages"
+                " where bot_id=? and group_id<>'' group by group_id",
+                (bot,),
+            ).fetchall()
+            resident_rows = self._conn.execute(
+                "select distinct scope from resident"
+                " where bot_id=? and scope like 'group:%'",
+                (bot,),
+            ).fetchall()
+        counts = {str(gid): int(n or 0) for gid, n in rows if gid}
+        for (scope,) in resident_rows:
+            gid = str(scope or "")[len("group:"):]
+            if gid:
+                counts.setdefault(gid, 0)
+        return [
+            {"group_id": gid, "messages": counts[gid]}
+            for gid in sorted(counts, key=lambda g: (-counts[g], g))
+        ]
+
+
     def stats(self) -> dict[str, int]:
         with self._lock:
             def one(sql: str) -> int:

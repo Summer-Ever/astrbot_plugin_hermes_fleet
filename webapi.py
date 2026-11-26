@@ -366,9 +366,15 @@ class FleetWebAPI:
         if err is not None:
             return err
         bot = self.plugin.svc.bot_of(pid)
+        groups: list[dict] = []
+        try:
+            groups = db.list_groups(bot)
+        except Exception:
+            logger.warning(f"[hermes_fleet] 读取 {pid} 的群清单失败:\n{_tb()}")
         return json_response({
             "platform_id": pid,
             "scopes": await admin.list_scopes(db, bot),
+            "groups": groups,
             "stats": db.stats(),
         })
 

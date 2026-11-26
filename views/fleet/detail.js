@@ -35,6 +35,7 @@
     file: "",
     stats: null,
     scopes: [],
+    groups: [],       // 该账号见过的群（来自消息与群常驻），可能还没有归档记忆
     scope: null,      // 当前选中的作用域 {scope, owner_id, group_id, count}
     items: [],
     selected: new Set(),
@@ -114,14 +115,33 @@
 
   // ---------------------------------------------------------------- 作用域
 
+  /** 展示用作用域：有记忆的作用域 + 「只说过话/只写过群常驻」的群。
+
+      群聊里常见的只有称呼这类常驻、没有归档记忆；不补上这一层，管理员在
+      页面上完全看不到这个群，也就没法查看或编辑它的群常驻。
+   */
+  function displayScopes() {
+    const out = st.scopes.slice();
+    const seen = new Set();
+    out.forEach((s) => {
+      if (s.scope === "group" && s.group_id) seen.add(s.group_id);
+    });
+    (st.groups || []).forEach((g) => {
+      if (!g.group_id || seen.has(g.group_id)) return;
+      out.push({ scope: "group", owner_id: "", group_id: g.group_id, count: 0 });
+    });
+    return out;
+  }
+
   function renderScopes() {
     const box = $("scope-list");
     clear(box);
-    if (!st.scopes.length) {
+    const rows = displayScopes();
+    if (!rows.length) {
       box.appendChild(el("div", "empty small", "这个账号还没有任何记忆。"));
       return;
     }
-    st.scopes.forEach((s) => {
+    rows.forEach((s) => {
       const row = el("button", "scope" + (st.scope && scopeKey(st.scope) === scopeKey(s) ? " active" : ""));
       row.appendChild(el("span", "scope-name mono", scopeLabel(s)));
       row.appendChild(el("span", "scope-kind", s.scope === "user" ? "按人" : (s.scope === "group" ? "按群" : "全局")));
@@ -140,12 +160,14 @@
   async function loadScopes() {
     const d = await apiGet("scopes", { platform_id: st.pid });
     st.scopes = d.scopes || [];
+    st.groups = d.groups || [];
     st.stats = d.stats || st.stats;
-    if (!st.scope && st.scopes.length) st.scope = st.scopes[0];
+    if (!st.scope && displayScopes().length) st.scope = displayScopes()[0];
     // 选中的作用域可能因为删除而消失
     if (st.scope) {
-      const found = st.scopes.find((s) => scopeKey(s) === scopeKey(st.scope));
-      st.scope = found || st.scopes[0] || null;
+      const found = displayScopes().find(
+        (s) => scopeKey(s) === scopeKey(st.scope));
+      st.scope = found || displayScopes()[0] || null;
     }
     renderScopes();
     renderHead();
@@ -406,6 +428,12 @@
       if (s.group_id && !seen.has(s.group_id)) {
         seen.add(s.group_id);
         out.push(s.group_id);
+      }
+    });
+    (st.groups || []).forEach((g) => {
+      if (g.group_id && !seen.has(g.group_id)) {
+        seen.add(g.group_id);
+        out.push(g.group_id);
       }
     });
     return out;
@@ -936,6 +964,7 @@
     if (changed) {
       st.stats = null;
       st.scopes = [];
+      st.groups = [];
       st.scope = null;
       st.items = [];
       st.selected.clear();
