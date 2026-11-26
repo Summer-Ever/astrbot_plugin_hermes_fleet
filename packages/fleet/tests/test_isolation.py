@@ -220,5 +220,21 @@ class TestLifecycle(FleetTestBase):
         self.assertFalse(self.reg.purge("never-existed"))
 
 
+class TestRecallPoolGuard(FleetTestBase):
+    async def test_recall_k_超过精排上限也不打断检索(self) -> None:
+        """`recall_k` 没有硬上限，k=8 时候选池会超过 MAX_RERANK。
+
+        以前这会让 rerank 抛 ValueError，整条检索链路直接失败；
+        现在池子在取候选前就夹住，配置写大最多是少召回，不会报错。
+        """
+        svc = MemoryService(self.reg, recall_k=8)
+        s = await svc.scene("qq-01", "u1", "", is_group=False)
+        for i in range(60):
+            await svc.save(s, f"第 {i} 条记忆：用户喜欢喝乌龙茶")
+        # 这里只断言「不抛异常」：60 条同质记忆会让 idf 触底、软门控把结果
+        # 全滤掉，返回空串是预期行为；回归点是以前会直接 ValueError。
+        self.assertIsInstance(await svc.search(s, "乌龙茶"), str)
+
+
 if __name__ == "__main__":
     unittest.main()

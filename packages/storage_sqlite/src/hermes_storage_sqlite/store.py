@@ -295,11 +295,16 @@ class SqliteMemoryStore:
         if not srcs:
             return 0
         with self._lock:
-            # 防止链成环：into 不能已经被合并到某个 source 上
+            # 目标必须真实存在：否则 sources 会挂到一个不存在的 merged_into 上，
+            # 从此对所有查询不可见（管理台也翻不出来），等于静默丢数据。
+            # 内存实现这里是抛 NotFound，这里至少要在写之前拦住。
             chain = self._conn.execute(
-                f"select merged_into from memories where id={target}"
+                "select merged_into from memories where id=?", (target,)
             ).fetchone()
-            node = int(chain[0]) if chain else 0
+            if chain is None:
+                raise ValueError(f"merge: 目标记忆 {target} 不存在")
+            # 防止链成环：into 不能已经被合并到某个 source 上
+            node = int(chain[0])
             seen = {target}
             while node:
                 if node in srcs:

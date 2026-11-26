@@ -55,8 +55,11 @@ def _add_src_paths() -> None:
 
 def _module_name_for(path: Path) -> str:
     rel = path.relative_to(ROOT).with_suffix("")
-    # 目录名可能含 `-`，模块名不允许，统一替换
-    return "hermes_suite_" + re.sub(r"\W", "_", "_".join(rel.parts))
+    # 目录名可能含 `-`，模块名不允许，统一替换。
+    # 前缀刻意不用 `hermes_`：`main.py` 的 `_purge_stale_packages()` 会把
+    # 所有「名字以 hermes_ 开头且文件在插件目录内」的模块从 sys.modules
+    # 里摘掉，正在执行的测试模块也会中招。
+    return "fleet_suite_" + re.sub(r"\W", "_", "_".join(rel.parts))
 
 
 def _load(path: Path):

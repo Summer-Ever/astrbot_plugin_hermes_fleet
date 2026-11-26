@@ -35,7 +35,7 @@ from hermes_contracts import (
     Visibility,
     clip,
 )
-from hermes_recall import rerank, render
+from hermes_recall import MAX_RERANK, rerank, render
 
 from .registry import BotRegistry, UNKNOWN_BOT, bot_id_of
 
@@ -204,8 +204,10 @@ class MemoryService:
     async def search(self, scene: Scene, query: str, *, limit: int | None = None) -> str:
         """检索并返回**已渲染成文本**的结果，直接可回给模型。
 
-        候选池只取 `recall_k * 8` 条：精排只接受 ≤50 条（`hermes_recall.MAX_RERANK`），
-        把全库捞进 Python 打分是 hermes_core 的病根，这里从接口上就不留入口。
+        候选池只取 `recall_k * 8` 条，并夹在 `MAX_RERANK` 以内：精排只接受
+        ≤50 条（`hermes_recall.MAX_RERANK`）。上限必须在**取候选之前**夹住，
+        不能指望 rerank 兜底——它超过 50 是直接抛 ValueError 的，而配置项
+        `recall_k` 没有硬上限，k=7 就会把整条检索链路打断。
         """
         db = self._db(scene)
         key = MemoryKey(
@@ -214,7 +216,7 @@ class MemoryService:
             owner_id=str(scene.owner_id),
             group_id=EMPTY,
         )
-        pool = max(32, (limit or self.recall_k) * 8)
+        pool = min(MAX_RERANK, max(32, (limit or self.recall_k) * 8))
         candidates = await db.memories.search_candidates(
             key,
             query=query,
@@ -395,20 +397,32 @@ class MemoryService:
         if not isinstance(resident, list) or not isinstance(memories, list):
             raise ValueError("导入数据格式错误")
 
-        n_res = 0
+        # 先全部校验再落库：第 N 条被拒时不能留下前 N-1 条已写入的
+        # 「导了一半」的账号。
+        entries: list[ResidentEntry] = []
         for item in resident:
             try:
                 scope = ResidentScope.parse(str(item.get("scope", "")))
                 block = ResidentBlock(str(item.get("block", "")))
             except ValueError as exc:
                 raise ValueError(f"常驻词条字段非法：{exc}") from exc
-            text = str(item.get("text", "") or "").strip()
-            entry = ResidentEntry(
+            # 导入路径必须和 set_resident 走同一套净化：否则用户改一份
+            # JSON 文档就能把块边界标记或指令腔写进常驻词条，绕过写入侧的
+            # 防护。clean_text 幂等，正常导出文件不受影响。
+            text = clean_text(str(item.get("text", "") or ""))
+            if text and is_injection(text):
+                label = BLOCK_LABELS.get(block, block.value)
+                raise ValueError(
+                    f"「{label}」词条文本带指令腔（试图改写规则或身份），"
+                    "已拒绝导入。"
+                )
+            entries.append(ResidentEntry(
                 bot_id=bot, owner_id=owner, scope=scope, block=block,
                 text=text, updated_ts=now,
-            )
+            ))
+        for entry in entries:
             await db.resident.upsert(entry)  # 空文本 = 清空该槽位
-            n_res += 1
+        n_res = len(entries)
 
         to_add: list[Memory] = []
         for item in memories:
