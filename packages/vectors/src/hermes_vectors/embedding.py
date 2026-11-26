@@ -46,7 +46,7 @@ class EmbeddingConfig:
     model: str = ""
     api_key: str = ""
     dim: int = 0
-    batch_size: int = 32
+    batch_size: int = 10
     timeout_s: float = 20.0
 
     def __post_init__(self) -> None:
@@ -61,7 +61,7 @@ class EmbeddingConfig:
         try:
             object.__setattr__(self, "batch_size", min(128, max(1, int(self.batch_size))))
         except (TypeError, ValueError):
-            object.__setattr__(self, "batch_size", 32)
+            object.__setattr__(self, "batch_size", 10)
         try:
             object.__setattr__(self, "timeout_s", max(1.0, float(self.timeout_s)))
         except (TypeError, ValueError):

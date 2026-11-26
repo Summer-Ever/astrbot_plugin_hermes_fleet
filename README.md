@@ -267,7 +267,8 @@ event.get_platform_id()   # -> 面板里给每个适配器配的 id，如 "qq-01
   在群里生效。
 - **群里不引用私聊记忆**：`group_private_memory` 默认关闭。`can_read` 里
   "owner 相同即可读"在私聊是对的，但群里把私聊内容念出来就是当众公开。
-- **群记忆不外溢**：在 A 群存的事，B 群检索不到。
+- **群记忆不外溢**：在 A 群存的事，B 群检索不到；**私聊也不召回群记忆**，
+  哪怕是自己说的——私聊与群聊是两套上下文。
 - **群里默认只记自己的**：`group_memory_shared` 默认关闭。同群别人说过的归档
   记忆不参与你的检索——「别人说的话被机器人当成你的记忆复述」既像串号也像
   泄密。确实要团队共享时，在管理台按账号打开；它不会突破跨群与私聊边界。
@@ -327,6 +328,43 @@ vLLM）。插件**不引入** onnxruntime / fastembed 这类原生依赖——�
 模型主动调 `search_memory` 时发生，不是每轮对话都调；接云端 API 还是本地
 Ollama/vLLM 取决于你的 QPS 与预算，插件侧只认 OpenAI 兼容协议。
 
+## 压力测试（等价环境）
+
+`benchmarks/bench_fleet_load.py` **不起 AstrBot**，直接按 `main.py` 的调用顺序跑
+`hermes_fleet`：身份解析 → 注入 → 检索 → 落库 →（可选）真实总结 / 向量索引。
+压的是记忆插件本身，而不是宿主的网络栈；并发出问题还会自动做跨账号、跨用户、
+群/私聊隔离探针。
+
+```bash
+# 离线：20 个账号 × 20 个用户（400 个并发会话）
+python benchmarks/bench_fleet_load.py --bots 20 --users-per-bot 20
+
+# 接本机正在用的总结模型（读 AstrBot 配置里的模型链）
+python benchmarks/bench_fleet_load.py --llm auto \
+    --llm-model 阿里云/qwen3.7-flash --summarize-bots 1
+
+# 接真实 embedding（自动探测 OpenAI 兼容端点）
+python benchmarks/bench_fleet_load.py --embed auto \
+    --vector-bots 2 --vector-concurrency 6
+```
+
+`--llm fake|auto|off`、`--embed fake|auto|off` 可切换；密钥只用于请求，不写进
+报告。`HERMES_BENCH_LLM_*` / `HERMES_BENCH_EMBED_*` 可覆盖自动探测。
+
+本机实测（单进程、单核）：
+
+| 场景 | 吞吐 | 单条 p95 | CPU | 说明 |
+|---|---:|---:|---:|---|
+| 400 用户，1 轮 / 1.5s | 1,087 ops/s | 检索 1.4ms · 落库 0.24ms | 34% | 余量充足 |
+| 1000 用户，1 轮 / 1.5s | 2,171 ops/s | 检索 1.9ms · 落库 0.5ms | 111% | 单核饱和 |
+| 真实 qwen3.7-flash 总结 | — | 25s / 会话 | — | 1 个会话产出 8 条记忆 |
+| 真实 text-embedding-v4 | 5.6 条/秒 | 查询 265ms | 7% | 1024 维，单批上限 10 |
+
+结论：**记忆插件本身不是瓶颈**（检索与落库都在毫秒内），瓶颈是单进程 CPU
+与 embedding 网络往返。1000 个持续发言的用户会吃满一个核；上千用户应多进程 /
+多 worker 部署。向量检索在字面召回不足时会多一次 embedding 调用（约 250ms），
+只影响模型主动调 `search_memory` 的那一轮，不是每轮对话。
+
 ## 开发
 
 ```bash
@@ -356,7 +394,7 @@ packages/contracts/           冻结的契约（实体只定义一次）
 packages/recall/              检索与重排（从 hermes_core 整份搬来）
 packages/vectors/             向量旁路库 + embedding 客户端（numpy 可选）
 packages/storage_sqlite/      四种 Store 的 SQLite 实现
-benchmarks/                   承载能力实测脚本
+benchmarks/                   承载能力实测脚本（含 bench_fleet_load 等价压测）
 docs/                         设计与部署文档
 owners.json                   模块所有权（谁可以改什么）
 ```

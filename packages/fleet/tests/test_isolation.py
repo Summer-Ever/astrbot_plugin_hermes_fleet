@@ -141,6 +141,14 @@ class TestVisibility(FleetTestBase):
         self.assertEqual((await self.svc.search(g2, "周报")).strip(), "",
                          "别的群不该看到本群的记忆")
 
+    async def test_私聊不召回自己的群记忆(self) -> None:
+        """私聊与群聊是两套上下文：自己说的群消息也不该在私聊里被复述。"""
+        g = await self.group("qq-01", "u1", "g-1")
+        await self.svc.save(g, "本群每周五交周报")
+        p = await self.private("qq-01", "u1")
+        self.assertEqual((await self.svc.search(p, "周报")).strip(), "",
+                         "私聊里复述群消息会让用户觉得串了台")
+
     async def test_群内默认只召回自己的记忆(self) -> None:
         """默认「群记忆只记自己的」：别人的发言不能被当成你的记忆复述。"""
         u1 = await self.group("qq-01", "u1", "g-1")

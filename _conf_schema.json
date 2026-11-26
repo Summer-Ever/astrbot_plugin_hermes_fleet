@@ -105,9 +105,9 @@
   },
   "vector_batch_size": {
     "type": "int",
-    "default": 32,
+    "default": 10,
     "description": "单次 embedding 请求的最大条数",
-    "hint": "索引时按这个大小合批。太小会放大网络往返，太大会触发部分供应商的请求体上限。建议 16～64。"
+    "hint": "索引时按这个大小合批。部分供应商限制很严（DashScope text-embedding-v4 单次最多 10 条），默认 10 最稳；OpenAI 等可调到 32～64 减少往返。超过供应商上限会整批失败并留到下轮重试。"
   },
   "vector_timeout_seconds": {
     "type": "float",

@@ -262,9 +262,18 @@ class MemoryService:
         同群成员读到任何 `visibility=group` 的条目，但「别人说过的话被机器人
         当成你的记忆复述」在百账号场景里既像串号也像泄密。要共享整群记忆
         必须按账号显式打开 `group_memory_shared`。
+
+        私聊则只读私聊记忆：群里的记忆（**包括自己说的**）只在群场景召回。
+        `can_read` 的「owner 相同即可读」在私聊里会把自己的群记忆也放进来，
+        而「私聊和群聊是两套上下文」是产品承诺——在私聊里复述群里的发言，
+        哪怕是自己说的，也会让用户觉得串了台。
         """
         if not memory.can_read(scene.owner_id, viewer_group=scene.viewer_group):
             return False
+        if not scene.is_group:
+            if memory.visibility is Visibility.GROUP or memory.group_id:
+                return False
+            return True
         if scene.is_group and not self._group_private_for(scene):
             if memory.visibility is Visibility.PRIVATE:
                 return False

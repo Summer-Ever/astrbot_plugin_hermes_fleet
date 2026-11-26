@@ -80,7 +80,7 @@ class VectorSettings:
     api_key: str = ""
     model: str = ""
     dim: int = 0
-    batch_size: int = 32
+    batch_size: int = 10
     timeout_s: float = 20.0
     sync_minutes: int = 5
     sync_bots: int = 20
@@ -94,7 +94,7 @@ class VectorSettings:
         object.__setattr__(self, "api_key", str(self.api_key or "").strip())
         object.__setattr__(self, "model", str(self.model or "").strip())
         object.__setattr__(self, "dim", _as_int(self.dim, 0, high=8192))
-        object.__setattr__(self, "batch_size", _as_int(self.batch_size, 32, low=1, high=128))
+        object.__setattr__(self, "batch_size", _as_int(self.batch_size, 10, low=1, high=128))
         object.__setattr__(self, "timeout_s", _as_float(self.timeout_s, 20.0, low=1.0, high=120.0))
         object.__setattr__(self, "sync_minutes", _as_int(self.sync_minutes, 5, low=1, high=1440))
         object.__setattr__(self, "sync_bots", _as_int(self.sync_bots, 20, low=1, high=200))
@@ -118,7 +118,7 @@ class VectorSettings:
             api_key=str(value("vector_api_key", "")),
             model=str(value("vector_model", "")),
             dim=value("vector_dim", 0),
-            batch_size=value("vector_batch_size", 32),
+            batch_size=value("vector_batch_size", 10),
             timeout_s=value("vector_timeout_seconds", 20),
             sync_minutes=value("vector_sync_minutes", 5),
             sync_bots=value("vector_sync_bots", 20),
