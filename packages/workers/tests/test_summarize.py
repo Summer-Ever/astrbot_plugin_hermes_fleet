@@ -137,6 +137,26 @@ class TestTrigger(Base):
         self.assertEqual(out.skipped, 0)
         self.db4.close()
 
+    async def test_群聊两条就总结(self) -> None:
+        """群聊按「群 + 发言人」拆会话，一次只有几条：不能等 20 条才总结。"""
+        self.db5 = SqliteBotDb(os.path.join(self.tmp, "f.db"))
+        await self.db5.messages.append_batch([
+            Message(bot_id=self.BOT, session_id=SessionId("g:1"), role="user",
+                    content="记住我叫老王", ts=self.now, sender_id="u1",
+                    group_id="g1"),
+            Message(bot_id=self.BOT, session_id=SessionId("g:1"), role="assistant",
+                    content="好的老王", ts=self.now + 1, group_id="g1"),
+        ])
+        llm = FakeLlm("[]")
+        out = await SessionSummarizer(
+            llm, now=lambda: self.now, min_messages=20).run_bot(
+            self.BOT, messages=self.db5.messages, memories=self.db5.memories,
+            identities=self.db5.identities)
+        self.assertEqual(len(llm.calls), 1, "群聊两条就该总结，不能等 20 条")
+        self.assertEqual(out.sessions_done, 1)
+        self.assertEqual(out.skipped, 0)
+        self.db5.close()
+
 
 class TestPreview(Base):
     async def test_预览不写库也不标记消息(self) -> None:

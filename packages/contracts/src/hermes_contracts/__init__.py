@@ -48,6 +48,7 @@ from .ids import (
     validate_bot_id,
 )
 from .models import (
+    MAX_INTIMACY_BLOCK_CHARS,
     MAX_MEMORY_CHARS,
     MAX_MESSAGE_CHARS,
     MAX_RESIDENT_BLOCK_CHARS,
@@ -66,6 +67,7 @@ from .models import (
     ResidentEntry,
     Skill,
     clip,
+    max_chars_for,
 )
 from .ports import (
     Deps,
@@ -132,6 +134,8 @@ __all__ = [
     "MAX_MESSAGE_CHARS",
     "MAX_MEMORY_CHARS",
     "MAX_RESIDENT_BLOCK_CHARS",
+    "MAX_INTIMACY_BLOCK_CHARS",
+    "max_chars_for",
     # ports
     "MemoryStore",
     "ResidentStore",

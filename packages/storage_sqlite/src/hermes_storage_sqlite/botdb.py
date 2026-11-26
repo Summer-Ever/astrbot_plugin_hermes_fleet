@@ -388,23 +388,28 @@ class SqliteMessageStore:
 
     async def list_pending_sessions(
         self, bot_id: BotId, *, limit: int = 50
-    ) -> list[tuple[SessionId, int, float]]:
+    ) -> list[tuple[SessionId, int, float, str]]:
         """按「最久没动静」排出待总结会话。
 
         走 `idx_msg_unsum(bot_id, session_id, summarized, id)`：过滤条件
         `summarized=0` 打头，分组键紧随其后，所以这条聚合是索引扫描而不是
         全表扫。消息表是最大的一张表（百万级），这条查询会被 worker 每轮
         调用一次，索引形状错了会变成稳定的 CPU 占用。
+
+        第四个值 `group_id` 不是给界面看的：群会话的触发门槛和私聊不同
+        （群聊一次只聊一两句，按 20 条会把它们永远挡在外面），worker 需要
+        在不额外查库的前提下知道这个会话是不是群。
         """
         with self._lock:
             rows = self._conn.execute(
-                "select session_id, count(*) as n, max(ts) as last_ts"
+                "select session_id, count(*) as n, max(ts) as last_ts,"
+                " max(group_id) as gid"
                 " from messages where bot_id=? and summarized=0"
                 " group by session_id order by last_ts asc limit ?",
                 (str(bot_id), int(limit)),
             ).fetchall()
         return [
-            (SessionId(str(r[0])), int(r[1]), float(r[2] or 0.0))
+            (SessionId(str(r[0])), int(r[1]), float(r[2] or 0.0), str(r[3] or ""))
             for r in rows
             if r[0]
         ]

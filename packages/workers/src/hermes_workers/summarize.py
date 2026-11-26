@@ -105,6 +105,8 @@ class SessionSummarizer:
         batch_limit: int = BATCH_LIMIT,
         min_messages: int = 8,
         idle_seconds: float = 6 * 3600,
+        group_min_messages: int = 2,
+        group_idle_seconds: float = 3600.0,
         max_sessions: int = 8,
         max_tokens: int = 900,
     ) -> None:
@@ -117,6 +119,12 @@ class SessionSummarizer:
         # 兜底：说完最后一句就没人再说话了，那几句恰恰最需要记住。
         # 只按条数触发的话，这类会话永远等不到总结。
         self.idle_seconds = max(60.0, float(idle_seconds))
+        # 群聊是另一种形态：AstrBot 按「群 + 发言人」拆会话，一次对话往往
+        # 只有 2–4 条。沿用私聊的 20 条门槛，群会话会永远停在待总结队列里
+        # （实测就是「群里怎么记不住」）。所以群聊用「一问一答就总结」+
+        # 1 小时兜底这两道更低的门槛。
+        self.group_min_messages = max(2, int(group_min_messages))
+        self.group_idle_seconds = max(60.0, float(group_idle_seconds))
         # 每轮最多处理几个会话。一轮跑太久会让「本轮已处理」的进度
         # 迟迟不落盘，重启后重复劳动。
         self.max_sessions = max(1, int(max_sessions))
@@ -149,8 +157,9 @@ class SessionSummarizer:
             return out
 
         out.sessions_seen = len(pending)
-        for session_id, count, last_ts in pending:
-            if not force and not await self._should_summarize(count, last_ts):
+        for session_id, count, last_ts, group_id in pending:
+            if not force and not await self._should_summarize(
+                    count, last_ts, is_group=bool(group_id)):
                 out.skipped += 1
                 continue
             try:
@@ -169,7 +178,13 @@ class SessionSummarizer:
             out.messages += marked
         return out
 
-    async def _should_summarize(self, count: int, last_ts: float) -> bool:
+    async def _should_summarize(self, count: int, last_ts: float, *,
+                                is_group: bool = False) -> bool:
+        if is_group:
+            # 群聊：一问一答就值得记，不必等 20 条；1 小时没动静也兜底。
+            if count >= self.group_min_messages:
+                return True
+            return (self._now() - float(last_ts or 0)) >= self.group_idle_seconds
         if count >= self.min_messages:
             return True
         return (self._now() - float(last_ts or 0)) >= self.idle_seconds
@@ -221,7 +236,7 @@ class SessionSummarizer:
         sessions = 0
         total_messages = 0
         items: list[dict] = []
-        for session_id, _count, _last_ts in pending:
+        for session_id, _count, _last_ts, _gid in pending:
             batch = await messages.fetch_unsummarized(
                 bot_id, session_id, limit=self.batch_limit)
             if not batch:

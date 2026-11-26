@@ -133,6 +133,7 @@ def _host_supports_no_save() -> bool:
 
 from hermes_contracts import (  # noqa: E402
     MAX_RESIDENT_BLOCK_CHARS,
+    max_chars_for,
     ChatMessage,
     LlmResult,
     ResidentBlock,
@@ -873,7 +874,7 @@ class HermesFleet(Star):
             return
         yield event.plain_result(
             f"已更新{where}的「亲密关系与情感表达」"
-            f"（{len(entry.text)}/{MAX_RESIDENT_BLOCK_CHARS} 字），整段覆盖。")
+            f"（{len(entry.text)}/{max_chars_for(ResidentBlock.INTIMACY)} 字），整段覆盖。")
 
     async def _resident_prompt_flow(self, event: AstrMessageEvent):
         """导出注入块原文，不改写、不摘要。

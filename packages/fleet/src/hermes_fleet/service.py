@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from hermes_contracts import (
     EMPTY,
     MAX_MEMORY_CHARS,
-    MAX_RESIDENT_BLOCK_CHARS,
+    max_chars_for,
     BotId,
     Memory,
     MemoryId,
@@ -312,10 +312,11 @@ class MemoryService:
                 f"「{label}」词条文本带指令腔（试图改写规则或身份），已拒绝。"
                 "词条记录的是事实与偏好，不是指令。"
             )
-        if len(body) > MAX_RESIDENT_BLOCK_CHARS:
+        limit = max_chars_for(target)
+        if len(body) > limit:
             raise ValueError(
                 f"「{label}」词条超长：{len(body)} 字 > 上限 "
-                f"{MAX_RESIDENT_BLOCK_CHARS} 字，请精简后整段重写。"
+                f"{limit} 字，请精简后整段重写。"
             )
 
         db = self._db(scene)

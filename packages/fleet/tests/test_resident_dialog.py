@@ -224,6 +224,16 @@ class RenderTest(unittest.TestCase):
         text = render_inject({}, is_group=False, query="帮我看下这段代码")
         self.assertNotIn("逐条核对", text)
 
+    def test_默认不限制注入总长(self) -> None:
+        """总预算默认关闭：词条本身已有 2000/3000 字上限，不再二次截断。"""
+        blocks = {
+            ResidentBlock.INTIMACY: "啊" * 3_000,
+            ResidentBlock.USER: "嗯" * 2_000,
+        }
+        text = render_inject(blocks, is_group=False)
+        self.assertIn("啊" * 3_000, text)
+        self.assertIn("嗯" * 2_000, text)
+
     def test_超预算时结构行必须完整(self) -> None:
         """对整串做 clip 会把 `[/记忆系统上下文]` 切掉，块从此没有边界。"""
         blocks = {b: "啊" * 2_000 for b in ResidentBlock.ordered()}

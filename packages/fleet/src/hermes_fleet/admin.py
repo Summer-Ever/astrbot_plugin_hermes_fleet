@@ -313,13 +313,14 @@ async def pending_messages(
     sessions = await db.messages.list_pending_sessions(bot_id, limit=max(1, int(limit)))
     out = []
     total = 0
-    for session_id, count, last_ts in sessions:
+    for session_id, count, last_ts, group_id in sessions:
         total += int(count)
         rows = await db.messages.fetch_unsummarized(
             bot_id, session_id, limit=MSG_PER_SESSION
         )
         out.append({
             "session_id": str(session_id),
+            "group_id": str(group_id or ""),
             "count": int(count),
             "last_ts": float(last_ts or 0.0),
             "items": [

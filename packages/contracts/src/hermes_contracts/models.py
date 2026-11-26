@@ -41,6 +41,15 @@ from .ids import (
 MAX_MESSAGE_CHARS = 8_000
 MAX_MEMORY_CHARS = 500
 MAX_RESIDENT_BLOCK_CHARS = 2_000
+# 「亲密关系与情感表达」是用户自己写的长文本（关系史、称呼、相处方式），
+# 单独放宽到 3000；其余词条保持 2000。
+MAX_INTIMACY_BLOCK_CHARS = 3_000
+
+
+def max_chars_for(block) -> int:
+    """词条的字数上限：intimacy 单独 3000，其余 2000。"""
+    return (MAX_INTIMACY_BLOCK_CHARS if block is ResidentBlock.INTIMACY
+            else MAX_RESIDENT_BLOCK_CHARS)
 MAX_SKILL_CONTENT_CHARS = 8_000
 
 
@@ -196,9 +205,10 @@ class ResidentEntry:
     updated_ts: float = 0.0
 
     def __post_init__(self) -> None:
-        if len(self.text) > MAX_RESIDENT_BLOCK_CHARS:
+        limit = max_chars_for(self.block)
+        if len(self.text) > limit:
             raise ValueError(
-                f"常驻词条超长：{self.block}={len(self.text)} > {MAX_RESIDENT_BLOCK_CHARS}"
+                f"常驻词条超长：{self.block}={len(self.text)} > {limit}"
             )
 
 
@@ -422,6 +432,8 @@ __all__ = [
     "MAX_MESSAGE_CHARS",
     "MAX_MEMORY_CHARS",
     "MAX_RESIDENT_BLOCK_CHARS",
+    "MAX_INTIMACY_BLOCK_CHARS",
+    "max_chars_for",
     "MAX_SKILL_CONTENT_CHARS",
     "clip",
     "Bot",
