@@ -236,6 +236,18 @@ def error_response(message: str = "", status_code: int = 400) -> dict[str, Any]:
     return {"__kind__": "error", "status": int(status_code), "message": str(message)}
 
 
+def file_response(path: str, filename: str = "", content_type: str = "",
+                  status_code: int = 200) -> dict[str, Any]:
+    """`astrbot.api.web.file_response` 的替身（真实宿主返回 FileResponse）。"""
+    return {
+        "__kind__": "file",
+        "status": int(status_code),
+        "path": str(path),
+        "filename": str(filename or ""),
+        "content_type": str(content_type or ""),
+    }
+
+
 logger = StubLogger()
 
 
@@ -290,6 +302,7 @@ def install() -> bool:
     web_mod.request = request  # type: ignore[attr-defined]
     web_mod.json_response = json_response  # type: ignore[attr-defined]
     web_mod.error_response = error_response  # type: ignore[attr-defined]
+    web_mod.file_response = file_response  # type: ignore[attr-defined]
 
     message_mod.TextPart = TextPart  # type: ignore[attr-defined]
 

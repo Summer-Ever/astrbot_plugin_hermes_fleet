@@ -93,11 +93,35 @@ class MemoryService:
         group_private_memory: bool = False,
         recall_k: int = 5,
         clock_now=None,
+        overrides_of=None,
     ) -> None:
         self.registry = registry
         self.group_private_memory = bool(group_private_memory)
         self.recall_k = max(1, int(recall_k))
         self._now = clock_now or time.time
+        # 按账号覆盖的解析器（通常是 `registry.overrides_of`）。留成注入
+        # 而不是直接调 registry，是为了这层仍然能脱离磁盘测：用例可以塞
+        # 一个纯 dict 进来验证「这个号的开关只影响这个号」。
+        self._overrides_of = overrides_of
+
+    def _override(self, scene: Scene, key: str):
+        if self._overrides_of is None:
+            return None
+        try:
+            return self._overrides_of(str(scene.bot_id)).get(key)
+        except Exception:
+            return None
+
+    def _group_private_for(self, scene: Scene) -> bool:
+        value = self._override(scene, "group_private_memory")
+        return self.group_private_memory if value is None else bool(value)
+
+    def _recall_for(self, scene: Scene) -> int:
+        value = self._override(scene, "recall_k")
+        try:
+            return max(1, int(value)) if value is not None else self.recall_k
+        except (TypeError, ValueError):
+            return self.recall_k
 
     # ------------------------------------------------------------ 归属
 
@@ -192,7 +216,7 @@ class MemoryService:
         """
         if not memory.can_read(scene.owner_id, viewer_group=scene.viewer_group):
             return False
-        if scene.is_group and not self.group_private_memory:
+        if scene.is_group and not self._group_private_for(scene):
             if memory.visibility is Visibility.PRIVATE:
                 return False
             if memory.scope is MemoryScope.USER and memory.group_id and (
@@ -216,7 +240,8 @@ class MemoryService:
             owner_id=str(scene.owner_id),
             group_id=EMPTY,
         )
-        pool = min(MAX_RERANK, max(32, (limit or self.recall_k) * 8))
+        take = limit or self._recall_for(scene)
+        pool = min(MAX_RERANK, max(32, take * 8))
         candidates = await db.memories.search_candidates(
             key,
             query=query,
@@ -225,7 +250,7 @@ class MemoryService:
             limit=pool,
         )
         usable = [m for m in candidates if self._visible(m, scene)]
-        hits = rerank(query, usable, k=limit or self.recall_k, now=self._now())
+        hits = rerank(query, usable, k=take, now=self._now())
         return render(hits)
 
     # ------------------------------------------------------------ 写记忆

@@ -114,8 +114,10 @@ class GoldenPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("爱吃甜", b)
         self.assertNotIn("怕辣", b)
 
-        dbs = [f for f in os.listdir(self.env.db_root) if f.endswith(".db")]
-        self.assertEqual(len(dbs), 2, f"每个账号应各有一个库文件，实际 {dbs}")
+        bots_root = os.path.join(self.env.db_root, "bots")
+        dirs = [d for d in os.listdir(bots_root)
+                if os.path.isfile(os.path.join(bots_root, d, "memory.db"))]
+        self.assertEqual(len(dirs), 2, f"每个账号应各有一个库文件，实际 {dirs}")
 
     async def test_总结失败时不标记消息(self) -> None:
         ev = self.env.event(message="随便说一句")
@@ -133,7 +135,7 @@ class GoldenPathTest(unittest.IsolatedAsyncioTestCase):
     async def test_管理台路由全部注册(self) -> None:
         routes = self.env.register_web_apis()
 
-        self.assertEqual(len(routes), 23, f"路由数量变了：{sorted(routes)}")
+        self.assertEqual(len(routes), 27, f"路由数量变了：{sorted(routes)}")
         overview = "/astrbot_plugin_hermes_fleet/overview"
         self.assertIn(overview, routes)
         self.assertEqual(routes[overview]["methods"], ["GET"])

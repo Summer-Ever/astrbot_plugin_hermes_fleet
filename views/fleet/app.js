@@ -374,6 +374,99 @@
     }
   }
 
+  // ---------------------------------------------------------------- 恢复
+
+  function fmtSize(n) {
+    const v = Number(n) || 0;
+    if (v < 1024) return v + " B";
+    if (v < 1024 * 1024) return (v / 1024).toFixed(1) + " KB";
+    return (v / 1024 / 1024).toFixed(1) + " MB";
+  }
+
+  function backupRow(item) {
+    const row = el("div", "backup-row");
+    row.appendChild(el("span", "name", item.filename));
+    row.appendChild(el("span", "dim small",
+      fullTime(item.created_at) + " · " + (item.bots || 0) + " 账号 · " +
+      fmtSize(item.size_bytes)));
+    const dl = el("button", "btn tiny", "下载");
+    dl.addEventListener("click", () => downloadBackup(item.filename));
+    row.appendChild(dl);
+    if (item.kind === "restore-point") {
+      const rb = el("button", "btn tiny danger", "回滚");
+      rb.addEventListener("click", () => rollbackBackup(item.filename));
+      row.appendChild(rb);
+    } else if (item.kind === "backup") {
+      const rs = el("button", "btn tiny", "恢复");
+      rs.addEventListener("click", () => restoreBackup(item.filename));
+      row.appendChild(rs);
+    }
+    return row;
+  }
+
+  async function openRestore() {
+    const modal = $("restore-modal");
+    const list = $("restore-list");
+    clear(list);
+    list.appendChild(el("p", "dim small", "读取中…"));
+    modal.classList.remove("hidden");
+    try {
+      const d = await apiGet("backup/list");
+      clear(list);
+      if (!(d.backups || []).length && !(d.restore_points || []).length) {
+        list.appendChild(el("p", "dim small",
+          "还没有备份。先点「备份全部记忆」。"));
+        return;
+      }
+      if ((d.backups || []).length) {
+        list.appendChild(el("div", "backup-sec", "备份（可恢复）"));
+        d.backups.forEach((it) => list.appendChild(backupRow(it)));
+      }
+      if ((d.restore_points || []).length) {
+        list.appendChild(el("div", "backup-sec", "恢复前快照（可回滚）"));
+        d.restore_points.forEach((it) => list.appendChild(backupRow(it)));
+      }
+    } catch (err) {
+      clear(list);
+      list.appendChild(el("p", "dim small", "读取备份列表失败：" + errMsg(err)));
+    }
+  }
+
+  async function downloadBackup(name) {
+    const bridge = getBridge();
+    if (!bridge || typeof bridge.download !== "function") {
+      toast("当前面板不支持下载，请用文件管理器打开备份目录", true);
+      return;
+    }
+    try {
+      await bridge.download("backup/download", { filename: name }, name);
+    } catch (err) {
+      toast("下载失败：" + errMsg(err), true);
+    }
+  }
+
+  /** 恢复/回滚共用：输入 RESTORE 二次确认，成功后刷新账号与健康信息。 */
+  async function applyBackup(endpoint, name, verb) {
+    const word = window.prompt(
+      verb + "会覆盖当前全部账号数据。\n输入 RESTORE 确认：", "");
+    if (word === null) return;
+    if (word.trim() !== "RESTORE") { toast("未输入 RESTORE，已取消", true); return; }
+    try {
+      const d = await apiPost(endpoint, { filename: name, confirm: "RESTORE" });
+      $("restore-modal").classList.add("hidden");
+      state.accounts.probed = false;
+      await loadAccounts();
+      await loadHealth(true);
+      const need = (d.needs_reload || []).length > 0;
+      toast(d.message || (verb + "完成"), need);
+    } catch (err) {
+      toast(verb + "失败：" + errMsg(err), true);
+    }
+  }
+
+  const restoreBackup = (name) => applyBackup("backup/restore", name, "恢复");
+  const rollbackBackup = (name) => applyBackup("backup/rollback", name, "回滚");
+
   async function probeCurrentPage() {
     const st = state.accounts;
     const ids = st.rows.map((r) => r.platform_id).filter(Boolean);
@@ -452,6 +545,12 @@
     $("btn-open-root").addEventListener("click", () => openDir("root", "库目录"));
     $("btn-backup").addEventListener("click", runBackup);
     $("backup-result").addEventListener("click", () => openDir("backups", "备份目录"));
+    $("btn-restore").addEventListener("click", openRestore);
+    $("restore-cancel").addEventListener("click",
+      () => $("restore-modal").classList.add("hidden"));
+    $("restore-modal").addEventListener("click", (e) => {
+      if (e.target === $("restore-modal")) $("restore-modal").classList.add("hidden");
+    });
 
     let timer = null;
     $("q").addEventListener("input", (e) => {

@@ -42,7 +42,11 @@
         </div>
         <div class="line">
           <span>备份</span>
-          <button class="mini-btn wide" id="btn-backup" title="把所有账号库打成一致性 zip，请另存到插件目录之外">备份全部记忆</button>
+          <button class="mini-btn wide" id="btn-backup" title="把所有账号库与插件设置打成一致性 zip，默认保存在插件数据目录之外">备份全部记忆</button>
+        </div>
+        <div class="line">
+          <span>恢复</span>
+          <button class="mini-btn wide" id="btn-restore" title="从备份包恢复全部账号与插件设置（会先自动保存恢复前快照）">恢复备份…</button>
         </div>
         <div class="line" id="backup-result-line" hidden><span id="backup-result" class="dim small"></span></div>
       </div>
@@ -302,6 +306,22 @@
   </div>
 
   <div class="toast" id="toast"></div>
+
+  <!-- 恢复备份：先列服务端已有的备份包，选中一个才调恢复接口。
+       恢复需要输入 RESTORE 二次确认，且服务端会先自动存一份恢复前快照。 -->
+  <div class="mask hidden" id="restore-modal">
+    <div class="modal">
+      <h3>恢复备份</h3>
+      <p class="dim small">
+        恢复会覆盖当前全部账号记忆与插件设置。动手前会自动保存一份「恢复前快照」，
+        恢复完发现不对可以立刻回滚。
+      </p>
+      <div class="backup-list" id="restore-list"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="restore-cancel">取消</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 桥接脚本由面板注入到页面末尾（本脚本之后），
        app.js 里是惰性读取 + 启动时等待，不依赖加载顺序。 -->

@@ -24,11 +24,12 @@ v0.5 只有 4 个只读接口（账号盘点）。v0.6 把 hermes_core 那种「
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
 from astrbot.api import logger
-from astrbot.api.web import error_response, json_response, request
+from astrbot.api.web import error_response, file_response, json_response, request
 
 PLUGIN_NAME = "astrbot_plugin_hermes_fleet"
 
@@ -82,6 +83,14 @@ class FleetWebAPI:
              "用系统文件管理器打开记忆库根目录（仅本机部署有效）"),
             (f"{self.prefix}/backup", self.backup, ["POST"],
              "把全部账号库一致性打包成 zip，供下载/异地保存"),
+            (f"{self.prefix}/backup/list", self.backup_list, ["GET"],
+             "列出最近备份与恢复点"),
+            (f"{self.prefix}/backup/download", self.backup_download, ["GET"],
+             "下载一个备份包"),
+            (f"{self.prefix}/backup/restore", self.backup_restore, ["POST"],
+             "从备份包恢复全部账号与设置（需 confirm=RESTORE）"),
+            (f"{self.prefix}/backup/rollback", self.backup_rollback, ["POST"],
+             "从恢复前快照回滚"),
             # ---- 全局：模型链与设置 ----
             (f"{self.prefix}/models", self.models, ["GET"],
              "降级链、累计计数、最近调用日志"),
@@ -630,11 +639,7 @@ class FleetWebAPI:
         if which not in ("root", "backups"):
             return self._fail("无效的目录类型")
         if which == "backups":
-            try:
-                data_dir = os.path.dirname(self.plugin._export_dir())
-            except Exception:
-                data_dir = os.path.dirname(root)
-            root = os.path.join(data_dir, "backups")
+            root = self._backup_out_dir()
             if not os.path.isdir(root):
                 return self._fail("还没有备份目录，请先点一次备份", 404)
 
@@ -655,7 +660,7 @@ class FleetWebAPI:
         return json_response({"ok": True, "path": root, "system": system})
 
     async def backup(self):
-        """把全部账号库打包成 zip（一致性快照），供下载/异地保存。
+        """把全部账号库与插件设置打包成 zip（一致性快照），供下载/异地保存。
 
         真正的工作在纯逻辑模块 `hermes_fleet.backup`，这里只取服务端路径、
         调函数、包装响应。备份目录固定在本机数据目录下，前端拿相对文件名
@@ -663,24 +668,191 @@ class FleetWebAPI:
         """
         from hermes_fleet.backup import backup_bots
 
-        # 数据目录从插件自己的 _export_dir() 反推（它返回 <data>/exports），
-        # 这样 bot_db_dir 被改到别处时备份仍落在插件数据目录，不跟库目录跑。
-        try:
-            data_dir = os.path.dirname(self.plugin._export_dir())
-        except Exception:
-            data_dir = os.path.dirname(str(self.plugin.registry.root))
-        out_dir = os.path.join(data_dir, "backups")
         try:
             result = backup_bots(
                 root=str(self.plugin.registry.root),
-                out_dir=out_dir,
+                out_dir=self._backup_out_dir(),
                 version=self.version,
+                config=self._config_values(),
             )
         except Exception:
             logger.error(f"[hermes_fleet] 备份失败:\n{_tb()}")
             return self._fail("备份失败，详见插件日志", 500)
 
         return json_response(result)
+
+    # ------------------------------------------------------------ 备份与恢复
+
+    def _backup_out_dir(self) -> str:
+        """备份目录（固定在插件数据目录，不跟 `bot_db_dir` 跑）。
+
+        必须落在 `plugin_data` 之外的理由：卸载插件勾「删除数据」会连带
+        删掉 `plugin_data/<插件>`，备份跟着消失就失去了「误删插件也能救」
+        的意义。`main.HermesFleet.backup_root()` 用同一个规则。
+        """
+        try:
+            return str(self.plugin.backup_root())
+        except Exception:
+            data_dir = os.path.dirname(str(self.plugin.registry.root))
+            return os.path.join(data_dir, "backups")
+
+    def _config_values(self) -> dict:
+        try:
+            return dict(self.plugin.config) if self.plugin.config is not None else {}
+        except Exception:
+            return {}
+
+    def _backup_path(self, filename: object) -> str:
+        """把客户端给的文件名夹进备份目录，非法规格返回空串。
+
+        只接受纯文件名：`..`、绝对路径、盘符一律不认。这是唯一由客户端
+        指定服务端文件的位置，必须窄到不能再窄。
+        """
+        name = str(filename or "").strip()
+        if not name or os.path.basename(name) != name:
+            return ""
+        if not name.endswith(".zip"):
+            return ""
+        return os.path.join(self._backup_out_dir(), name)
+
+    def _restore_lock(self) -> asyncio.Lock:
+        """插件级串行锁：两个恢复同时跑会互相覆盖对方的暂存目录。"""
+        lock = getattr(self.plugin, "_backup_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            try:
+                self.plugin._backup_lock = lock
+            except Exception:
+                pass
+        return lock
+
+    async def backup_list(self):
+        from hermes_fleet.restore import list_backups
+
+        out_dir = self._backup_out_dir()
+        items = list_backups(out_dir)
+        return json_response({
+            "dir": out_dir,
+            "count": len(items),
+            "backups": [i for i in items if i["kind"] != "restore-point"],
+            "restore_points": [i for i in items if i["kind"] == "restore-point"],
+            "latest": items[0]["filename"] if items else "",
+        })
+
+    async def backup_download(self):
+        name = str(request.query.get("filename") or "")
+        path = self._backup_path(name)
+        if not path or not os.path.isfile(path):
+            return self._fail("备份文件不存在", 404)
+        return file_response(
+            path, filename=os.path.basename(path),
+            content_type="application/zip",
+        )
+
+    async def _run_restore(self, path: str, *, confirm: str,
+                           want_config: bool, rollback: bool):
+        """恢复/回滚的公共后半段：关库 → 换文件 → 重建索引 → 应用设置。"""
+        from hermes_fleet.restore import RestoreError, restore_backup, rollback_restore
+
+        reg = self.plugin.registry
+        runner = rollback_restore if rollback else restore_backup
+        async with self._restore_lock():
+            try:
+                result = await asyncio.to_thread(
+                    lambda: runner(
+                        path,
+                        root=str(reg.root),
+                        out_dir=self._backup_out_dir(),
+                        confirm=confirm,
+                        version=self.version,
+                        # 换入前必须先关连接：Windows 上库文件被打开时
+                        # `os.replace` 会直接失败；关早一点，别的协程又会
+                        # 立刻把库重新打开。这里紧贴着换入动作关。
+                        before_apply=reg.close_all,
+                        after_apply=reg.reload_from_disk,
+                    )
+                )
+            except RestoreError as exc:
+                return self._fail(str(exc))
+            except Exception:
+                logger.error(f"[hermes_fleet] 恢复失败:\n{_tb()}")
+                return self._fail("恢复失败，详见插件日志", 500)
+
+        payload = result.pop("config", None)
+        config_saved: list[str] = []
+        config_errors: list[str] = []
+        needs_reload: list[str] = []
+        if want_config and isinstance(payload, dict) and payload:
+            from hermes_fleet.settings import NEEDS_RELOAD, clean_values
+
+            # `bot_db_dir` 保留本机值：恢复包的库路径属于另一台机器，
+            # 覆盖过来会让插件去找一个本机不存在的目录。
+            values = {k: v for k, v in payload.items() if k != "bot_db_dir"}
+            cleaned, errors = clean_values(self._schema(), values)
+            config_errors.extend(errors)
+            if cleaned and self.plugin.config is not None:
+                try:
+                    self.plugin.config.update(cleaned)
+                    await self.plugin.config.save_config_async()
+                    config_saved = sorted(cleaned)
+                    needs_reload = sorted(k for k in cleaned if k in NEEDS_RELOAD)
+                except Exception:
+                    logger.error(f"[hermes_fleet] 恢复插件设置失败:\n{_tb()}")
+                    config_errors.append("插件设置写入失败，详见日志")
+
+        message = str(result.get("message") or "")
+        if config_saved:
+            message += f" 已恢复设置 {len(config_saved)} 项。"
+        if config_errors:
+            message += " 设置恢复有问题：" + "；".join(config_errors) + "。"
+        if needs_reload:
+            message += " 需重载插件生效：" + "、".join(needs_reload) + "。"
+        result.update({
+            "message": message,
+            "config_saved": config_saved,
+            "config_errors": config_errors,
+            "needs_reload": needs_reload,
+        })
+        return json_response(result)
+
+    async def backup_restore(self):
+        from hermes_fleet.restore import RestoreError, inspect_backup
+
+        body = await self._body()
+        path = self._backup_path(body.get("filename"))
+        if not path or not os.path.isfile(path):
+            return self._fail("备份文件不存在", 404)
+        # 预检放在这里先跑一次：让「包坏了」在开锁之前就以问题清单返回，
+        # 而不是让 restore_backup 抛一个异常了事。
+        plan = inspect_backup(path, root=str(self.plugin.registry.root))
+        if not plan["ok"]:
+            return self._fail("备份包不可用：" + "；".join(plan["problems"]))
+        try:
+            return await self._run_restore(
+                path,
+                confirm=str(body.get("confirm") or ""),
+                want_config=body.get("config") is not False,
+                rollback=False,
+            )
+        except RestoreError as exc:  # pragma: no cover - _run_restore 已兜住
+            return self._fail(str(exc))
+
+    async def backup_rollback(self):
+        from hermes_fleet.restore import PRERESTORE_PREFIX
+
+        body = await self._body()
+        name = str(body.get("filename") or "").strip()
+        if not name.startswith(PRERESTORE_PREFIX):
+            return self._fail("回滚只接受恢复前快照（hermes-pre-restore-*.zip）")
+        path = self._backup_path(name)
+        if not path or not os.path.isfile(path):
+            return self._fail("快照文件不存在", 404)
+        return await self._run_restore(
+            path,
+            confirm=str(body.get("confirm") or ""),
+            want_config=body.get("config") is not False,
+            rollback=True,
+        )
 
     # ------------------------------------------------------------------ 模型
 

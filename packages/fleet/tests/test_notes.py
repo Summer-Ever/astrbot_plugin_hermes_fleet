@@ -29,7 +29,7 @@ class NoteBase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="fleet-note-")
         self.root = os.path.join(self.tmp, "bots")
         self.reg = BotRegistry(self.root, max_open=2)
-        # 造一个真实库文件，`accounts()` 只按磁盘上的 .db 出行
+        # 造一个真实账号（bots/<stem>/ 目录），accounts() 只按磁盘上的账号出行
         self.reg.get("qq-01").close()
 
     def tearDown(self) -> None:
@@ -72,8 +72,9 @@ class TestRegistryNotes(NoteBase):
         self.reg.set_note("qq-01", "全新的名字")
         self.assertEqual(self.reg.db_path("qq-01"), before)
         self.assertTrue(os.path.exists(before))
-        self.assertEqual(os.path.basename(before),
-                         bot_file_stem("qq-01") + ".db")
+        self.assertEqual(os.path.basename(before), "memory.db")
+        self.assertEqual(os.path.basename(os.path.dirname(before)),
+                         bot_file_stem("qq-01"))
 
     def test_accounts_carry_note(self) -> None:
         self.reg.set_note("qq-01", "客服号")
@@ -90,12 +91,15 @@ class TestRegistryNotes(NoteBase):
 
     def test_broken_notes_file_is_survivable(self) -> None:
         """备注文件坏了只等于「没有备注」，不能连账号列表一起挂掉。"""
-        self.reg.set_note("qq-01", "客服号")
+        self.reg.set_note("qq-01", "客服号")           # 已落库 → 存 bot.json
+        self.reg.set_note("qq-99", "还没说话的号")      # 未落库 → 暂存 _notes.json
         with open(os.path.join(self.root, "_notes.json"), "w",
                   encoding="utf-8") as fp:
             fp.write("{ not json")
         again = BotRegistry(self.root, max_open=2)
-        self.assertEqual(again.note_of("qq-01"), "")
+        # 账号自己的配置不受影响；只有临时暂存的那条会丢（等价于没起过名）。
+        self.assertEqual(again.note_of("qq-01"), "客服号")
+        self.assertEqual(again.note_of("qq-99"), "")
         self.assertEqual(len(again.accounts()), 1)
 
 

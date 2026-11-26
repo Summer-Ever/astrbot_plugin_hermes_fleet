@@ -1,4 +1,4 @@
-"""管理台路由扫雷：23 条接口逐条真调用，不允许未捕获异常或 500。
+"""管理台路由扫雷：27 条接口逐条真调用，不允许未捕获异常或 500。
 
 为什么值得单独一层：`webapi.py` 是「页面点了没反应」的高发区，而它的
 单元测试（`console` / `admin`）只测纯逻辑，测不到「handler 名称写错、
@@ -37,7 +37,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         load_main()
 
     async def asyncSetUp(self) -> None:
-        # 23 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
+        # 27 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
         # 这不是卡顿，调高阈值免得每次 CI 都刷一条误导性的告警。
         asyncio.get_running_loop().slow_callback_duration = 5.0
         self.env = PluginEnv()
@@ -48,7 +48,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def test_空参数逐条调用不崩(self) -> None:
-        self.assertEqual(len(self.routes), 23, f"路由变了：{sorted(self.routes)}")
+        self.assertEqual(len(self.routes), 27, f"路由变了：{sorted(self.routes)}")
 
         failures: list[str] = []
         for route in sorted(self.routes):
@@ -116,6 +116,46 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
     async def _save_resident(self, ev) -> None:
         msg = await self.env.plugin.tool_update_resident(ev, "address", "杭州")
         self.assertIn("杭州", msg)
+
+    async def test_备份下载恢复整条链路(self) -> None:
+        """备份 → 列表 → 下载 → 恢复，一条链走通（这是会动数据的路径）。"""
+        import shutil
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="hermes-web-bk-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.env.plugin.backup_root = lambda: os.path.join(tmp, "backups")
+
+        ev = self.env.event(message="我住在杭州")
+        await self.env.turn(ev, "我住在杭州", "好的")
+
+        web_request.reset()
+        res = await self.routes[f"{PREFIX}/backup"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        name = res["data"]["filename"]
+        self.assertEqual(res["data"]["bots"], 1)
+
+        web_request.reset()
+        res = await self.routes[f"{PREFIX}/backup/list"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIn(name, [i["filename"] for i in res["data"]["backups"]])
+
+        web_request.reset(query={"filename": name})
+        res = await self.routes[f"{PREFIX}/backup/download"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertEqual(res["__kind__"], "file")
+
+        web_request.reset(payload={"filename": name, "confirm": "RESTORE"})
+        res = await self.routes[f"{PREFIX}/backup/restore"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertEqual(res["data"]["restored"], 1)
+        self.assertTrue(res["data"]["snapshot_name"].startswith("hermes-pre-restore-"))
+
+        # 恢复后连接必须已重建，账号仍可读（否则页面会白屏）。
+        web_request.reset(query={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/account"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertEqual(res["data"]["platform_id"], "qq-01")
 
 
 if __name__ == "__main__":

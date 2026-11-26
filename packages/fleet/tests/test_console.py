@@ -245,7 +245,7 @@ class TestOrphanAndMissingRealCases(unittest.TestCase):
 
             # 索引里有、文件被删
             import os
-            os.remove(f"{d}/{bot_file_stem('bot-a')}.db")
+            os.remove(reg.db_path("bot-a"))
             rows = [r for r in reg.accounts() if r["missing"]]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["platform_id"], "bot-a")

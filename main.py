@@ -302,6 +302,9 @@ class HermesFleet(Star):
                 self._get_cfg("group_private_memory", False), False
             ),
             recall_k=int(self._get_cfg("recall_k", 5)),
+            # 检索与群聊可见性按账号覆盖：bot.json 里有值就用它，否则跟随
+            # 上面的全局配置。解析器是纯读，registry 内部有 meta 缓存。
+            overrides_of=self.registry.overrides_of,
         )
         self._inject_guard: dict[str, float] = {}
         self.provider = self._new_fallback()
@@ -460,6 +463,18 @@ class HermesFleet(Star):
         head = umo.split(":", 1)[0].strip()
         return head or "default"
 
+    def _bot_flag(self, platform_id: str, key: str, default: bool) -> bool:
+        """该账号的开关：`bot.json` 里有显式值就用它，否则跟随全局。
+
+        解析失败一律退回全局默认。开关只影响「要不要干活」，为一条坏
+        bot.json 把消息链路整个打断，代价远大于多记一条记忆。
+        """
+        try:
+            value = self.registry.overrides_of(platform_id).get(key)
+        except Exception:
+            return default
+        return default if value is None else bool(value)
+
     def _scene_args(self, event: AstrMessageEvent) -> dict:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         gid = str(event.get_group_id() or "")
@@ -589,7 +604,9 @@ class HermesFleet(Star):
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         try:
-            if not as_flag(self._get_cfg("capture_messages", True), True):
+            capture = as_flag(self._get_cfg("capture_messages", True), True)
+            if not self._bot_flag(
+                    self._platform_id(event), "capture_messages", capture):
                 return
             user_text = (event.message_str or "").strip()
             reply = str(getattr(resp, "completion_text", "") or "").strip()
@@ -1166,6 +1183,8 @@ class HermesFleet(Star):
         # 没写新记忆的库每轮都扫一遍纯属空转。
         consolidate_on = as_flag(self._get_cfg("consolidate_enabled", True), True)
         for pid in picked:
+            if not self._bot_flag(pid, "summarize_enabled", True):
+                continue
             try:
                 db = self.registry.get(pid)
                 outcome = await self.summarizer.run_bot(
@@ -1178,7 +1197,8 @@ class HermesFleet(Star):
                 logger.error(f"[hermes_fleet] 账号 {pid} 总结失败：{exc}")
                 continue
             total.add(outcome)
-            if consolidate_on and outcome.memories > 0:
+            if (consolidate_on and outcome.memories > 0
+                    and self._bot_flag(pid, "consolidate_enabled", True)):
                 try:
                     cons.add(await self.consolidator.run_bot(
                         self.svc.bot_of(pid), memories=db.memories))
@@ -1200,6 +1220,8 @@ class HermesFleet(Star):
             return "还没有任何账号产生过数据"
         total = ConsolidateOutcome()
         for pid in bots[: max(1, max_bots)]:
+            if not self._bot_flag(pid, "consolidate_enabled", True):
+                continue
             try:
                 db = self.registry.get(pid)
                 # 重置该账号的节流状态，让手动命令立刻生效
@@ -1236,9 +1258,30 @@ class HermesFleet(Star):
     # ------------------------------------------------------------ 生命周期
 
     async def initialize(self):
+        # 先把 v1 的平铺库搬进 per-bot 目录，再统计。迁移是幂等的，失败也
+        # 不会动原文件；只有真的搬了账号才打日志，避免每次启动刷屏。
+        try:
+            mig = self.registry.migrate_v2(
+                backup_dir=self.backup_root(), version=PLUGIN_VERSION
+            )
+            if mig.get("migrated"):
+                logger.info(
+                    f"[hermes_fleet] 已升级数据布局 v2：迁移 {len(mig['migrated'])} 个账号"
+                    f"，迁移前备份 {mig.get('backup') or '（未启用）'}"
+                )
+            for item in mig.get("failed") or []:
+                logger.error(
+                    f"[hermes_fleet] 账号 {item.get('stem')} 迁移失败：{item.get('error')}"
+                )
+        except Exception:
+            logger.error(
+                f"[hermes_fleet] 数据布局迁移异常：\n{traceback.format_exc(limit=5)}"
+            )
+
         st = self.registry.stats()
         logger.info(
             f"[hermes_fleet] v{PLUGIN_VERSION} 已加载，库目录 {st['root']}，"
+            f"布局 {st['layout']}，"
             f"已有 {len(st['files_on_disk'])} 个账号库，"
             f"最多同时打开 {st['max_open']} 个"
         )
@@ -1246,6 +1289,19 @@ class HermesFleet(Star):
         if as_flag(self._get_cfg("summarize_enabled", True), True):
             self._bg_task = asyncio.create_task(self._bg_loop())
             logger.info("[hermes_fleet] 自动总结已启动")
+
+    def backup_root(self) -> str:
+        """备份落点：放在 `plugin_data/<插件>` 之外。
+
+        卸载插件时勾「删除数据」会递归删掉 `plugin_data/<插件>` 和
+        `config/<插件>_config.json`。备份若放在插件数据目录里，会跟着
+        一起消失——而「误删插件」恰恰是最需要备份的场景。这里放在
+        `data/hermes_fleet_backups/`，与 `plugin_data` 平级。
+        """
+        data_dir = os.path.dirname(os.path.dirname(_default_data_dir()))
+        if not data_dir or data_dir == os.path.dirname(data_dir):
+            data_dir = os.path.dirname(_default_data_dir())
+        return os.path.join(data_dir, "hermes_fleet_backups")
 
     def _register_web_apis(self) -> None:
         """挂载管理台接口（页面见 views/fleet/）。
