@@ -41,8 +41,22 @@
       "test": "python run_tests.py -p recall",
       "change_policy": "排序数学有大量实测调参，改动必须带对比数据（命中率/注入字数）"
     },
-    "hermes_memory": {
-      "owner": "memory",
+    "hermes_vectors": {
+      "owner": "recall",
+      "status": "in_progress",
+      "may_import": [
+        "<stdlib>（numpy 仅为可选加速，缺省时纯 Python 退化路径必须可用）"
+      ],
+      "owns": [
+        "向量数学与 float32 编码",
+        "每账号旁路库 vectors.db 的 DDL 与读写",
+        "OpenAI 兼容 /embeddings 客户端"
+      ],
+      "deliverable": "精确 KNN（numpy 可选）+ 旁路向量库 + embedding HTTP 客户端；不含记忆业务语义",
+      "test": "python run_tests.py -p vectors",
+      "change_policy": "改编码/维度约定必须同步 store 与索引器；不得引入第三方硬依赖（安装失败会拖垮整个插件加载）"
+    },
+    "hermes_memory": {      "owner": "memory",
       "status": "in_progress",
       "may_import": [
         "hermes_contracts"

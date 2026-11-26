@@ -450,6 +450,78 @@ class SqliteMemoryStore:
             ).fetchone()
         return int(r[0]) if r else 0
 
+    async def fingerprint(self, bot_id: BotId) -> dict[str, float]:
+        """活跃记忆的轻量指纹：条数 / 最大 id / 最后更新时间。
+
+        给向量索引器做「这一轮需不需要对账」的廉价判断。用一条聚合查询
+        代替「把全库 id 与正文捞出来比一遍」：100 个账号每 5 分钟各扫一次
+        全表，累积起来是一笔可观的 IO，而绝大多数轮次其实什么都没变。
+
+        三个分量缺一不可：
+        - `count`：合并（软删）会让活跃条数下降；
+        - `max_id`：新增记忆不一定改 updated_ts（总结写入时可能留 0）；
+        - `max_updated`：管理台整条改写不会改变 id 与条数。
+        """
+        with self._lock:
+            r = self._conn.execute(
+                "select count(*), coalesce(max(id),0),"
+                " coalesce(max(updated_ts),0)"
+                " from memories where bot_id=? and merged_into=0",
+                (str(bot_id),),
+            ).fetchone()
+        return {
+            "count": int(r[0] or 0) if r else 0,
+            "max_id": int(r[1] or 0) if r else 0,
+            "max_updated": float(r[2] or 0.0) if r else 0.0,
+        }
+
+    async def iter_active(self, bot_id: BotId, *, after_id: int = 0,
+                          limit: int = 0) -> Sequence[tuple[int, str, float]]:
+        """按 id 升序取活跃记忆的 `(id, content, 最近时间)`。
+
+        只给向量索引器用：它需要正文算 content_hash，但不需要构造 `Memory`
+        实体（那会多读十几个字段、多一次 dataclass 分配）。`limit=0` 表示
+        全量，由调用方按批次自己截断。
+
+        第三个值取 `updated_ts`，为 0 时退回 `ts`：总结写入的记忆从不设置
+        `updated_ts`（默认 0），而向量库要按它做「最近窗口」排序——直接用 0
+        会让「最近」退化成随机。写入时间 `ts` 至少单调递增，语义也对得上。
+        """
+        sql = (
+            "select id, content,"
+            " case when updated_ts > 0 then updated_ts else ts end as recency"
+            " from memories"
+            " where bot_id=? and merged_into=0 and id>? order by id asc"
+        )
+        args: list = [str(bot_id), int(after_id)]
+        cap = int(limit)
+        if cap > 0:
+            sql += " limit ?"
+            args.append(cap)
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [(int(r[0]), str(r[1]), float(r[2] or 0.0)) for r in rows]
+
+    async def get_many(self, bot_id: BotId,
+                       ids: Sequence[int]) -> Sequence[Memory]:
+        """按 id 批量取回（向量检索命中后用）。**不过滤可见性**——
+        可见性由 `MemoryService._visible` 统一复核，这里只看 id 是否存在。"""
+        clean = [int(i) for i in ids if i]
+        if not clean:
+            return []
+        out: list[Memory] = []
+        with self._lock:
+            for start in range(0, len(clean), 400):
+                chunk = clean[start:start + 400]
+                ph = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"select {_COLS} from memories"
+                    f" where bot_id=? and id in ({ph})",
+                    (str(bot_id), *chunk),
+                ).fetchall()
+                out.extend(_row_to_memory(r) for r in rows)
+        return out
+
     async def list_scopes(self, bot_id: BotId, *, min_active: int = 1,
                           ) -> Sequence[tuple[MemoryKey, int]]:
         """按 (scope, owner, group) 分组计数。

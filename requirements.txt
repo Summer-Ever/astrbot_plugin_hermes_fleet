@@ -7,5 +7,10 @@
 #    测试就不再是「拉下来就能跑」。
 #
 # 标准库已覆盖：sqlite3（含 FTS5）、asyncio、dataclasses、hashlib、threading。
-# 唯一的可选依赖是 sqlite-vec（向量召回），装上才启用，不装退化为字面召回：
-# sqlite-vec>=0.1.6
+# 唯一的可选依赖是 numpy（向量召回的全库精确 KNN）。装上走矩阵乘；
+# 不装则只在「最近约 2k 条」窗口里做纯 Python 点积，字面召回始终可用。
+# numpy>=1.24
+#
+# 刻意不引入 sqlite-vec / faiss / onnxruntime：原生扩展装不上的后果是
+# 整个插件在加载期失败，连字面记忆一起失去。向量模型统一走 OpenAI 兼容
+# 的 /embeddings HTTP 接口（云端或本地 Ollama/vLLM 均可）。

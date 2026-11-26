@@ -17,8 +17,13 @@ from typing import Any
 # 这样以后加配置项忘了归类也只是排到末尾，而不是在页面上消失。
 GROUPS: list[tuple[str, list[str]]] = [
     ("记忆注入", ["memory_injection", "inject_to_system_prompt", "capture_messages",
-                  "recall_k", "group_private_memory",
+                  "recall_k", "recall_mode", "group_private_memory",
+                  "group_memory_shared",
                   "resident_block_max_chars", "resident_intimacy_max_chars"]),
+    ("向量检索", ["vector_provider", "vector_base_url", "vector_api_key",
+                  "vector_model", "vector_dim", "vector_batch_size",
+                  "vector_timeout_seconds", "vector_sync_minutes",
+                  "vector_sync_bots", "vector_sync_batch", "vector_min_score"]),
     ("存储与容量", ["bot_db_dir", "max_open_bots", "account_stale_days"]),
     ("后台总结", ["summarize_enabled", "summarize_interval_minutes",
                   "summarize_min_messages", "summarize_idle_hours",
@@ -34,7 +39,12 @@ GROUPS: list[tuple[str, list[str]]] = [
 # 降级链实例），改了必须重启插件才生效。前端要明确标注，
 # 否则用户会以为「保存了但没反应」是 bug。
 NEEDS_RELOAD: set[str] = {
-    "bot_db_dir", "max_open_bots", "recall_k",
+    "bot_db_dir", "max_open_bots", "recall_k", "recall_mode",
+    "group_memory_shared",
+    "vector_provider", "vector_base_url", "vector_api_key", "vector_model",
+    "vector_dim", "vector_batch_size", "vector_timeout_seconds",
+    "vector_sync_minutes", "vector_sync_bots", "vector_sync_batch",
+    "vector_min_score",
     "summarize_enabled", "summarize_interval_minutes", "summarize_min_messages",
     "summarize_idle_hours", "summarize_sessions_per_bot",
     "consolidate_enabled", "consolidate_min_active",

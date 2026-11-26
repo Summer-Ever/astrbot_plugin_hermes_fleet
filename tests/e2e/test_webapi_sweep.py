@@ -1,4 +1,4 @@
-"""管理台路由扫雷：32 条接口逐条真调用，不允许未捕获异常或 500。
+"""管理台路由扫雷：35 条接口逐条真调用，不允许未捕获异常或 500。
 
 为什么值得单独一层：`webapi.py` 是「页面点了没反应」的高发区，而它的
 单元测试（`console` / `admin`）只测纯逻辑，测不到「handler 名称写错、
@@ -37,7 +37,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         load_main()
 
     async def asyncSetUp(self) -> None:
-        # 32 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
+        # 35 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
         # 这不是卡顿，调高阈值免得每次 CI 都刷一条误导性的告警。
         asyncio.get_running_loop().slow_callback_duration = 5.0
         self.env = PluginEnv()
@@ -48,7 +48,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def test_空参数逐条调用不崩(self) -> None:
-        self.assertEqual(len(self.routes), 32, f"路由变了：{sorted(self.routes)}")
+        self.assertEqual(len(self.routes), 35, f"路由变了：{sorted(self.routes)}")
 
         failures: list[str] = []
         for route in sorted(self.routes):
@@ -188,6 +188,56 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         # 全局资源类开关不认识就直接拒，不能静默丢掉。
         web_request.reset(payload={
             "platform_id": "qq-01", "overrides": {"llm_provider_ids": "x"},
+        })
+        res = await self.routes[route]["handler"]()
+        self.assertEqual(res["status"], 400, res)
+
+    async def test_向量索引接口在未配置时安全降级(self) -> None:
+        """没配 embedding 时，状态/重建/清除都必须 200，不能报错吓人。"""
+        ev = self.env.event(message="我住在杭州")
+        await self.env.turn(ev, "我住在杭州", "好的")
+
+        web_request.reset(query={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/vector/status"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        data = res["data"]
+        self.assertIs(data["enabled"], False)
+        self.assertEqual(data["layout"], "v2")
+        self.assertIn("indexed", data)
+        self.assertIn("active", data)
+
+        web_request.reset(payload={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/vector/rebuild"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIs(res["data"]["enabled"], False)
+
+        web_request.reset(payload={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/vector/clear"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertEqual(res["data"]["indexed"], 0)
+
+        # 不认识的账号必须 404，不能凭空建库。
+        web_request.reset(query={"platform_id": "nope"})
+        res = await self.routes[f"{PREFIX}/vector/status"]["handler"]()
+        self.assertEqual(res["status"], 404, res)
+
+    async def test_群共享与检索档可保存且非法值被拒(self) -> None:
+        ev = self.env.event(message="我住在杭州")
+        await self.env.turn(ev, "我住在杭州", "好的")
+        route = f"{PREFIX}/account-overrides"
+
+        web_request.reset(payload={
+            "platform_id": "qq-01",
+            "overrides": {"group_memory_shared": True, "recall_mode": "vector"},
+        })
+        res = await self.routes[route]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertIs(res["data"]["overrides"]["group_memory_shared"], True)
+        self.assertEqual(res["data"]["overrides"]["recall_mode"], "vector")
+
+        # 枚举值写错要报错，而不是静默退回 classic。
+        web_request.reset(payload={
+            "platform_id": "qq-01", "overrides": {"recall_mode": "semantic"},
         })
         res = await self.routes[route]["handler"]()
         self.assertEqual(res["status"], 400, res)

@@ -91,14 +91,23 @@ class MemoryService:
         registry: BotRegistry,
         *,
         group_private_memory: bool = False,
+        group_memory_shared: bool = False,
         recall_k: int = 5,
+        recall_mode: str = "classic",
+        vector_recall=None,
         clock_now=None,
         overrides_of=None,
         block_limits_of=None,
     ) -> None:
         self.registry = registry
         self.group_private_memory = bool(group_private_memory)
+        self.group_memory_shared = bool(group_memory_shared)
         self.recall_k = max(1, int(recall_k))
+        # 全局默认档；按账号可由 bot.json 的 recall_mode 覆盖。
+        self.recall_mode = str(recall_mode or "classic").strip().lower()
+        # 语义召回只做「补齐」：字面召回不足时再向它要人，见 search()。
+        # 注入成对象而不是直接 new，是为了这层能脱离网络/向量库测。
+        self._vector_recall = vector_recall
         self._now = clock_now or time.time
         # 按账号覆盖的解析器（通常是 `registry.overrides_of`）。留成注入
         # 而不是直接调 registry，是为了这层仍然能脱离磁盘测：用例可以塞
@@ -128,6 +137,28 @@ class MemoryService:
     def _group_private_for(self, scene: Scene) -> bool:
         value = self._override(scene, "group_private_memory")
         return self.group_private_memory if value is None else bool(value)
+
+    def _group_shared_for(self, scene: Scene) -> bool:
+        value = self._override(scene, "group_memory_shared")
+        return self.group_memory_shared if value is None else bool(value)
+
+    def _recall_mode_for(self, scene: Scene) -> str:
+        return self.recall_mode_of(str(scene.bot_id))
+
+    def recall_mode_of(self, platform_id: str) -> str:
+        """该账号的检索档位。索引器也用它来决定「这个号值不值得建索引」。
+
+        公开成方法而不是让索引器自己读 `overrides_of`：解析规则只有一处，
+        否则「页面显示 vector、后台却在按 classic 过滤」这种不一致只能靠人发现。
+        """
+        value = None
+        if self._overrides_of is not None:
+            try:
+                value = self._overrides_of(str(platform_id or "")).get("recall_mode")
+            except Exception:
+                value = None
+        mode = str(value or self.recall_mode or "classic").strip().lower()
+        return mode if mode in ("classic", "vector") else "classic"
 
     def _recall_for(self, scene: Scene) -> int:
         value = self._override(scene, "recall_k")
@@ -226,6 +257,11 @@ class MemoryService:
         `Memory.can_read` 里「owner 相同即可读」在私聊上下文是对的，
         但群聊里把私聊内容念出来就是当众公开。这条策略来自 hermes_core
         的实测教训，保留为默认关闭的开关而不是直接删掉。
+
+        群内可见的记忆还有第二道闸：默认**只记自己的**。`can_read` 允许
+        同群成员读到任何 `visibility=group` 的条目，但「别人说过的话被机器人
+        当成你的记忆复述」在百账号场景里既像串号也像泄密。要共享整群记忆
+        必须按账号显式打开 `group_memory_shared`。
         """
         if not memory.can_read(scene.owner_id, viewer_group=scene.viewer_group):
             return False
@@ -236,6 +272,14 @@ class MemoryService:
                 memory.group_id != scene.group_id
             ):
                 return False
+        if (
+            scene.is_group
+            and memory.visibility is Visibility.GROUP
+            and memory.group_id == scene.group_id
+            and memory.owner_id != scene.owner_id
+            and not self._group_shared_for(scene)
+        ):
+            return False
         return True
 
     async def search(self, scene: Scene, query: str, *, limit: int | None = None) -> str:
@@ -264,7 +308,48 @@ class MemoryService:
         )
         usable = [m for m in candidates if self._visible(m, scene)]
         hits = rerank(query, usable, k=take, now=self._now())
+        hits = await self._semantic_fill(scene, query, hits, take)
         return render(hits)
+
+    async def _semantic_fill(self, scene: Scene, query: str, hits: list,
+                             take: int) -> list:
+        """字面召回不足时，用向量召回补齐。
+
+        **为什么是「补齐」而不是「并池后再精排」**：精排（`rank_fused`）
+        用 BM25 打分，与问句没有任何字面交集的候选会得到 0 分并被直接丢弃。
+        而向量召回要解决的恰恰就是「词汇鸿沟」——把语义相关、字面不重合的
+        条目并进候选池，它们在精排里仍然是 0 分，等于白做一次昂贵的向量查询。
+
+        所以顺序是：先跑已验证的字面链路（docs/06 里有完整评测），只有当它
+        给不满 `k` 条时才向向量要人，且按余弦相似度排序追加在后面。这样：
+
+        - 字面链路够用时，输出与 classic 完全一致（不引入回归）；
+        - 字面链路沉默时（最典型的「明明记过却想不起来」），语义条目补上；
+        - 向量服务故障时，结果与 classic 完全一致（向量是增益，不是依赖）。
+        """
+        if len(hits) >= take or self._vector_recall is None:
+            return hits
+        if self._recall_mode_for(scene) != "vector":
+            return hits
+        exclude = {int(h.memory.id) for h in hits}
+        try:
+            extra = await self._vector_recall.semantic_hits(
+                scene, query, exclude=exclude, limit=take - len(hits)
+            )
+        except Exception:  # noqa: BLE001 — 语义召回任何失败都不能拖垮检索
+            return hits
+        for hit in extra or []:
+            try:
+                mid = int(hit.memory.id)
+            except Exception:
+                continue
+            if mid in exclude or not self._visible(hit.memory, scene):
+                continue
+            exclude.add(mid)
+            hits.append(hit)
+            if len(hits) >= take:
+                break
+        return hits
 
     # ------------------------------------------------------------ 写记忆
 
@@ -292,10 +377,18 @@ class MemoryService:
         """软删除一条记忆（`merged_into` 指向自身表示已废弃，可回滚）。
 
         不做物理删除：模型判断「这条该忘」会有判错的时候，物理删掉无法补救。
+
+        必须校验**归属**而不只是「能读到」：打开群共享后，同群成员的记忆对
+        你可见，但「可见」不等于「可删」——让模型能删掉别人说的话，等于把
+        共享开关变成了破坏入口。公共/全局记忆（owner 为空）只由管理台处理。
         """
         db = self._db(scene)
         existing = await db.memories.get(scene.bot_id, MemoryId(int(memory_id)))
-        if existing is None or not self._visible(existing, scene):
+        if existing is None:
+            return False
+        if str(existing.owner_id or "") != str(scene.owner_id or ""):
+            return False
+        if not self._visible(existing, scene):
             return False
         await db.memories.update(existing.merged(int(memory_id), at=self._now()))
         return True

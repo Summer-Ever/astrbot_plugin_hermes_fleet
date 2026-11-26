@@ -141,6 +141,49 @@ class TestVisibility(FleetTestBase):
         self.assertEqual((await self.svc.search(g2, "周报")).strip(), "",
                          "别的群不该看到本群的记忆")
 
+    async def test_群内默认只召回自己的记忆(self) -> None:
+        """默认「群记忆只记自己的」：别人的发言不能被当成你的记忆复述。"""
+        u1 = await self.group("qq-01", "u1", "g-1")
+        await self.svc.save(u1, "本群每周五交周报")
+
+        u2 = await self.group("qq-01", "u2", "g-1")
+        self.assertEqual((await self.svc.search(u2, "周报")).strip(), "",
+                         "没打开 group_memory_shared 时不能读到别人存的群记忆")
+        # 自己的仍然读得到
+        self.assertIn("周报", await self.svc.search(u1, "周报"))
+
+    async def test_按账号打开群内共享后才可见他人群记忆(self) -> None:
+        svc = MemoryService(
+            self.reg,
+            overrides_of=lambda pid: (
+                {"group_memory_shared": True} if pid == "qq-01" else {}
+            ),
+        )
+        u1 = await svc.scene("qq-01", "u1", "g-1", is_group=True)
+        await svc.save(u1, "本群每周五交周报")
+
+        u2 = await svc.scene("qq-01", "u2", "g-1", is_group=True)
+        self.assertIn("周报", await svc.search(u2, "周报"),
+                      "显式打开共享后，同群成员应能共享归档记忆")
+
+        # 共享只作用于这个账号：同 id 的另一个 bot 仍是关闭状态。
+        other_u1 = await svc.scene("qq-02", "u1", "g-1", is_group=True)
+        await svc.save(other_u1, "本群每周五交周报")
+        other = await svc.scene("qq-02", "u2", "g-1", is_group=True)
+        self.assertEqual((await svc.search(other, "周报")).strip(), "")
+
+        # 共享不会突破私聊边界：群记忆不该在私聊里被召回。
+        p2 = await svc.scene("qq-01", "u2", "", is_group=False)
+        self.assertEqual((await svc.search(p2, "周报")).strip(), "",
+                         "群共享不能变成「私聊也能读到群里的记忆」")
+
+        # 「可见」不等于「可删」：共享群记忆不能让别人替你删掉。
+        shared = await svc.scene("qq-01", "u1", "g-1", is_group=True)
+        theirs = await svc.save(shared, "u1 的群记忆")
+        u2_group = await svc.scene("qq-01", "u2", "g-1", is_group=True)
+        self.assertFalse(await svc.forget(u2_group, int(theirs.id)),
+                         "打开共享后也不能删别人的记忆")
+
     async def test_forget_是软删除(self) -> None:
         p = await self.private("qq-01", "u1")
         m = await self.svc.save(p, "用户养了两只猫")

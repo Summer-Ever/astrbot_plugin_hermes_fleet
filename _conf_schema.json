@@ -59,6 +59,86 @@
     "description": "允许在群聊引用本人的私聊记忆",
     "hint": "默认关闭。群里的回复是当众的，一旦注入就等于当众公开私事。只在确认群内全是熟人时打开。"
   },
+  "group_memory_shared": {
+    "type": "bool",
+    "default": false,
+    "description": "群内共享他人的归档记忆",
+    "hint": "默认关闭：群里只记得「你自己说过的话」，同群别人说过的记忆不参与检索。打开后同群成员共享归档记忆，适合团队群/工作群；仍不会跨群，也不会把私聊内容带进群。可按账号在管理台覆盖。"
+  },
+  "recall_mode": {
+    "type": "string",
+    "default": "classic",
+    "options": ["classic", "vector"],
+    "description": "默认检索模式（可按账号覆盖）",
+    "hint": "classic：字面检索（FTS + BM25 精排），零依赖、零额外调用。vector：在字面检索凑不满时，用 embedding 按语义补齐。向量是增益不是依赖：未配置模型或调用失败时自动退回 classic。按账号可在管理台「开关」页覆盖。"
+  },
+  "vector_provider": {
+    "type": "string",
+    "default": "off",
+    "options": ["off", "api"],
+    "description": "向量模型来源",
+    "hint": "off：不启用。api：调用 OpenAI 兼容的 /embeddings 接口（OpenAI、硅基流动、百炼、Ollama /v1、vLLM 均可）。本地模型请先起一个 Ollama/vLLM 再用 api 接入，插件本身不引入原生依赖。"
+  },
+  "vector_base_url": {
+    "type": "string",
+    "default": "https://api.openai.com/v1",
+    "description": "embedding 接口地址（不含 /embeddings）",
+    "hint": "会拼成 {base_url}/embeddings。已经带 /embeddings 后缀的地址不会再重复拼接。Ollama 示例：http://127.0.0.1:11434/v1。"
+  },
+  "vector_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "embedding 接口密钥",
+    "hint": "以 Authorization: Bearer 发送。本地 Ollama/vLLM 通常不需要，留空即可。注意：该值保存在插件的 JSON 配置里，请限制配置文件权限。"
+  },
+  "vector_model": {
+    "type": "string",
+    "default": "",
+    "description": "embedding 模型名",
+    "hint": "例如 text-embedding-3-small、bge-m3、nomic-embed-text。留空等于不启用（即使 provider 选了 api）。模型名变了会自动清空旧向量并重建——不同模型的向量空间互不相通。"
+  },
+  "vector_dim": {
+    "type": "int",
+    "default": 0,
+    "description": "向量维度（0 = 由服务返回决定）",
+    "hint": "OpenAI text-embedding-3 系列可指定降维（如 512）以省存储；不支持的供应商会忽略或报错，报错时改回 0。实际维度始终以响应为准。"
+  },
+  "vector_batch_size": {
+    "type": "int",
+    "default": 32,
+    "description": "单次 embedding 请求的最大条数",
+    "hint": "索引时按这个大小合批。太小会放大网络往返，太大会触发部分供应商的请求体上限。建议 16～64。"
+  },
+  "vector_timeout_seconds": {
+    "type": "float",
+    "default": 20,
+    "description": "embedding 请求超时（秒）",
+    "hint": "检索路径上查询向量化超过这个时间就放弃并退回字面召回，不会让用户一直等。"
+  },
+  "vector_sync_minutes": {
+    "type": "int",
+    "default": 5,
+    "description": "向量索引同步间隔（分钟）",
+    "hint": "后台按这个间隔增量索引新增/修改/合并掉的记忆。新记忆在下一轮之前仍可由字面检索召回，不影响对话。"
+  },
+  "vector_sync_bots": {
+    "type": "int",
+    "default": 20,
+    "description": "每轮最多同步几个账号",
+    "hint": "按游标轮转。100 个账号、每轮 20 个时，约 5 轮覆盖一遍。只同步检索模式为 vector 的账号。"
+  },
+  "vector_sync_batch": {
+    "type": "int",
+    "default": 256,
+    "description": "每账号每轮最多索引多少条",
+    "hint": "首次建库或模型变更后需要重建，用它把一次大重建拆成多轮，避免一轮跑太久、也避免一次打满 embedding 配额。"
+  },
+  "vector_min_score": {
+    "type": "float",
+    "default": 0.35,
+    "description": "语义补齐的最低余弦相似度",
+    "hint": "低于该值的候选不追加。中文 embedding 的相关记忆通常在 0.4～0.7；调低会引入弱相关噪声，调高会让补齐几乎不生效。建议 0.3～0.5。"
+  },
   "summarize_enabled": {
     "type": "bool",
     "default": true,

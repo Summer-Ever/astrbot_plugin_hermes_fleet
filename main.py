@@ -151,6 +151,7 @@ from hermes_fleet import (  # noqa: E402
     render_help,
 )
 from hermes_fleet.settings import as_flag  # noqa: E402
+from hermes_fleet.vector import VectorGlue, VectorSettings  # noqa: E402
 from hermes_workers import (  # noqa: E402
     ConsolidateOutcome,
     FallbackProvider,
@@ -159,7 +160,7 @@ from hermes_workers import (  # noqa: E402
     SummaryOutcome,
 )
 
-PLUGIN_VERSION = "0.9.0"
+PLUGIN_VERSION = "0.10.0"
 
 # 同一句话的注入去重窗口（秒）。一次用户发言可能触发多轮 LLM 请求
 # （工具调用循环），每轮都注入等于把同一段记忆反复塞进上下文。
@@ -297,12 +298,24 @@ class HermesFleet(Star):
         self.registry = BotRegistry(
             root, max_open=int(self._get_cfg("max_open_bots", 24))
         )
+        # 向量旁路：配置为 off 时它只是个空壳（不开库、不联网）。
+        # 先于 MemoryService 构造，因为 service 需要把它当成「语义补齐」的注入口。
+        self.vector = VectorGlue(
+            self.registry,
+            VectorSettings.from_config(self._get_cfg),
+            log=lambda msg: logger.warning(msg),
+        )
         self.svc = MemoryService(
             self.registry,
             group_private_memory=as_flag(
                 self._get_cfg("group_private_memory", False), False
             ),
             recall_k=int(self._get_cfg("recall_k", 5)),
+            group_memory_shared=as_flag(
+                self._get_cfg("group_memory_shared", False), False
+            ),
+            recall_mode=str(self._get_cfg("recall_mode", "classic") or "classic"),
+            vector_recall=self.vector,
             # 检索与群聊可见性按账号覆盖：bot.json 里有值就用它，否则跟随
             # 上面的全局配置。解析器是纯读，registry 内部有 meta 缓存。
             overrides_of=self.registry.overrides_of,
@@ -318,6 +331,7 @@ class HermesFleet(Star):
             max_tokens=int(self._get_cfg("summarize_max_tokens", 900)),
         )
         self._bg_task: asyncio.Task | None = None
+        self._vector_task: asyncio.Task | None = None
         self._bot_cursor = 0
         self.consolidator = MemoryConsolidator(
             self.provider,
@@ -1340,6 +1354,39 @@ class HermesFleet(Star):
                 logger.error(f"[hermes_fleet] 自动总结异常：\n{traceback.format_exc(limit=5)}")
             await asyncio.sleep(interval)
 
+    async def _vector_loop(self):
+        """向量索引的后台同步循环。
+
+        与总结循环分开而不是合在一起：两者的失败语义完全不同。总结失败是
+        「这一轮没记住」，索引失败只是「语义召回晚一点可用」，后者不该
+        因为前者持续失败而被一起拖住（反过来也一样）。
+
+        只在配置了 embedding provider 时启动；`sync_all` 内部还会再按账号的
+        recall_mode 过滤，不向量召回的账号一条 embedding 都不会发。
+        """
+        interval = max(1, int(self.vector.settings.sync_minutes)) * 60
+        # 启动后先等一轮：刚重启时 migrate/适配器重连都在抢 IO，而索引
+        # 没有任何实时性要求。
+        await asyncio.sleep(min(120.0, interval))
+        while True:
+            try:
+                note = await self.vector.sync_all(
+                    mode_of=self.svc.recall_mode_of,
+                    max_bots=self.vector.settings.sync_bots,
+                )
+                if note.get("added") or note.get("errors"):
+                    logger.info(
+                        f"[hermes_fleet] 向量索引：{note['bots']} 个账号，"
+                        f"新增 {note['added']} 条，失败 {note['errors']} 个"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error(
+                    f"[hermes_fleet] 向量索引异常：\n{traceback.format_exc(limit=5)}"
+                )
+            await asyncio.sleep(interval)
+
     # ------------------------------------------------------------ 生命周期
 
     async def initialize(self):
@@ -1374,6 +1421,9 @@ class HermesFleet(Star):
         if as_flag(self._get_cfg("summarize_enabled", True), True):
             self._bg_task = asyncio.create_task(self._bg_loop())
             logger.info("[hermes_fleet] 自动总结已启动")
+        if self.vector.enabled:
+            self._vector_task = asyncio.create_task(self._vector_loop())
+            logger.info(f"[hermes_fleet] 向量索引已启动：{self.vector.describe()}")
 
     def backup_root(self) -> str:
         """备份落点：放在 `plugin_data/<插件>` 之外。
@@ -1433,6 +1483,15 @@ class HermesFleet(Star):
             except (asyncio.CancelledError, Exception):
                 pass
             self._bg_task = None
+        if self._vector_task is not None:
+            self._vector_task.cancel()
+            try:
+                await self._vector_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._vector_task = None
+        # 旁路库先于记忆库关闭：后台任务已经停了，这里只剩本地文件句柄。
+        self.vector.close()
         try:
             self.registry.close_all()
         except Exception:

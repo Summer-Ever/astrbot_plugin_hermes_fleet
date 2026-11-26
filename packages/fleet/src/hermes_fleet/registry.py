@@ -55,9 +55,14 @@ OVERRIDE_BOOLS = (
     "summarize_enabled",
     "consolidate_enabled",
     "group_private_memory",
+    # 群内共享：关闭（默认）时群里只记得「自己说过的话」，同群别人的记忆
+    # 不参与检索。打开后同群成员共享归档记忆（仍不会跨群、也不会带上私聊）。
+    "group_memory_shared",
 )
 OVERRIDE_INT_RANGES = {"recall_k": (1, 20)}
-OVERRIDE_KEYS = OVERRIDE_BOOLS + tuple(OVERRIDE_INT_RANGES)
+# 枚举型开关：值必须落在白名单里，写错要报错（不是静默退回默认）。
+OVERRIDE_ENUMS = {"recall_mode": ("classic", "vector")}
+OVERRIDE_KEYS = OVERRIDE_BOOLS + tuple(OVERRIDE_INT_RANGES) + tuple(OVERRIDE_ENUMS)
 
 # 迁移与备份校验时统计的表。表不存在（老库/未来删表）按 0 算，不阻断。
 _TABLES = ("messages", "memories", "resident", "identities")
@@ -122,6 +127,11 @@ def clean_overrides(raw: object) -> dict:
             except (TypeError, ValueError):
                 continue
             out[key] = min(high, max(low, value))
+    for key, allowed in OVERRIDE_ENUMS.items():
+        if key in raw and raw[key] is not None:
+            value = str(raw[key]).strip().lower()
+            if value in allowed:
+                out[key] = value
     return out
 
 

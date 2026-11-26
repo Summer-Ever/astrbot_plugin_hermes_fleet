@@ -259,6 +259,20 @@
               <div class="result" id="import-result"></div>
             </div>
             <div class="card">
+              <h3>向量索引</h3>
+              <p>把归档记忆向量化后，字面检索凑不满条数时会按语义相似度补齐。
+                索引存在旁路库 <code>vectors.db</code> 里，与记忆本身分离：
+                删掉或重建都不影响已有记忆。</p>
+              <dl class="kv" id="vector-status"></dl>
+              <div class="toolbar">
+                <button class="btn" id="btn-vector-rebuild">重建索引</button>
+                <button class="btn ghost" id="btn-vector-clear">清除索引</button>
+              </div>
+              <div class="hint">重建按批执行：页面显示已索引 / 剩余条数，剩下的由后台
+                每轮继续。只有把「检索模式」设为向量补齐的账号才会建索引。</div>
+              <div class="result" id="vector-result"></div>
+            </div>
+            <div class="card">
               <h3>账号信息</h3>
               <dl class="kv" id="d-info"></dl>
             </div>

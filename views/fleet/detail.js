@@ -747,8 +747,16 @@
     ["summarize_enabled", "后台总结"],
     ["consolidate_enabled", "记忆整理"],
     ["group_private_memory", "群内引用私聊记忆"],
+    ["group_memory_shared", "群内共享他人记忆"],
   ];
   const OV_STATES = [["inherit", "跟随全局"], ["on", "开启"], ["off", "关闭"]];
+  // 枚举型覆盖项：值和标签一一对应，保存时 null 表示回到全局。
+  const OV_ENUMS = [
+    ["recall_mode", "检索模式", [
+      ["classic", "经典（字面）"],
+      ["vector", "向量补齐"],
+    ]],
+  ];
 
   function renderOverrides() {
     const box = $("ov-form");
@@ -780,6 +788,22 @@
     if (st.overrides.recall_k !== undefined) rk.value = String(st.overrides.recall_k);
     row.appendChild(rk);
     box.appendChild(row);
+
+    OV_ENUMS.forEach(([key, label, options]) => {
+      const r = el("div", "ov-row");
+      r.appendChild(el("span", "ov-label", label));
+      const sel = el("select", "input");
+      sel.id = "ov-" + key;
+      [["inherit", "跟随全局"], ...options].forEach(([value, text]) => {
+        const opt = el("option", "", text);
+        opt.value = value;
+        sel.appendChild(opt);
+      });
+      const cur = st.overrides[key];
+      sel.value = cur === undefined ? "inherit" : String(cur);
+      r.appendChild(sel);
+      box.appendChild(r);
+    });
   }
 
   async function saveOverrides() {
@@ -799,6 +823,10 @@
       }
       updates.recall_k = n;
     }
+    OV_ENUMS.forEach(([key]) => {
+      const value = $("ov-" + key).value;
+      updates[key] = value === "inherit" ? null : value;
+    });
     const btn = $("btn-ov-save");
     btn.disabled = true;
     try {
@@ -975,6 +1003,92 @@
     }
   }
 
+  // ---------------------------------------------------------------- 向量索引
+
+  // 这一块刻意不放进「开关」页：开关改的是策略，索引状态是「现在有多少
+  // 东西被向量化」，两者一起看才知道「开了向量召回但还没建索引」。
+  function renderVector(d) {
+    const box = $("vector-status");
+    clear(box);
+    const on = !!d.enabled;
+    const rows = [
+      ["状态", on ? "已启用" : "未启用（设置里填写 vector_model 并重启）"],
+      ["模型", d.model || "—"],
+      ["维度", d.dim ? String(d.dim) : "—"],
+      ["索引 / 活跃", num(d.indexed) + " / " + num(d.active)],
+      ["待索引", num(d.pending)],
+      ["最后同步", d.last_sync_ts ? fullTime(d.last_sync_ts) : "—"],
+    ];
+    if (d.layout !== "v2") {
+      rows.push(["布局", d.layout === "legacy"
+        ? "v1 平铺布局（迁移完成后自动启用）"
+        : "库文件缺失"]);
+    }
+    if (d.numpy === false) {
+      rows.push(["性能", "未安装 numpy，只扫最近 " + num(d.scan_cap)
+        + " 条向量（全库精确检索建议 pip install numpy）"]);
+    }
+    if (d.last_error) rows.push(["最近错误", d.last_error]);
+    rows.forEach(([k, v]) => {
+      box.appendChild(el("dt", "", k));
+      box.appendChild(el("dd", "", v));
+    });
+    const usable = on && d.layout === "v2";
+    $("btn-vector-rebuild").disabled = !usable;
+    $("btn-vector-clear").disabled = !(d.indexed > 0);
+  }
+
+  async function loadVector() {
+    const box = $("vector-status");
+    if (!st.pid) return;
+    clear(box);
+    box.appendChild(el("dt", "", "状态"));
+    box.appendChild(el("dd", "", "读取中…"));
+    try {
+      renderVector(await apiGet("vector/status", { platform_id: st.pid }));
+    } catch (err) {
+      clear(box);
+      box.appendChild(el("dt", "", "状态"));
+      box.appendChild(el("dd", "", "读取失败：" + errMsg(err)));
+    }
+  }
+
+  async function rebuildVector() {
+    const btn = $("btn-vector-rebuild");
+    const out = $("vector-result");
+    btn.disabled = true;
+    btn.textContent = "重建中…";
+    out.textContent = "正在调用 embedding 服务，可能需要一会儿…";
+    try {
+      const d = await apiPost("vector/rebuild", { platform_id: st.pid });
+      out.textContent = d.message || (d.error ? "失败：" + d.error : "完成");
+      toast(d.error ? "重建失败：" + d.error : "向量索引已更新", !!d.error);
+      await loadVector();
+    } catch (err) {
+      out.textContent = "重建失败：" + errMsg(err);
+      toast("重建失败：" + errMsg(err), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "重建索引";
+    }
+  }
+
+  async function clearVector() {
+    if (!window.confirm("清空这个账号的向量索引？记忆本身不会删除，之后可以重建。")) {
+      return;
+    }
+    const out = $("vector-result");
+    try {
+      const d = await apiPost("vector/clear", { platform_id: st.pid });
+      out.textContent = d.message || "已清空";
+      toast("向量索引已清空");
+      await loadVector();
+    } catch (err) {
+      out.textContent = "清空失败：" + errMsg(err);
+      toast("清空失败：" + errMsg(err), true);
+    }
+  }
+
   // ---------------------------------------------------------------- tab
 
   function switchTab(name) {
@@ -986,6 +1100,7 @@
       $("pane-" + k).classList.toggle("hidden", k !== name);
     });
     if (name === "overrides") renderOverrides();
+    if (name === "actions") loadVector();
     if (name === "resident" && !st.loadedTabs.resident) {
       st.loadedTabs.resident = true;
       loadResident();
@@ -1065,6 +1180,8 @@
     $("btn-msg").addEventListener("click", loadMessages);
     $("btn-summarize").addEventListener("click", runSummarize);
     $("btn-ov-save").addEventListener("click", saveOverrides);
+    $("btn-vector-rebuild").addEventListener("click", rebuildVector);
+    $("btn-vector-clear").addEventListener("click", clearVector);
     $("btn-preview-summarize").addEventListener("click", previewSummarize);
     $("btn-apply-summarize").addEventListener("click", applySummarize);
     $("btn-preview-consolidate").addEventListener("click", previewConsolidate);

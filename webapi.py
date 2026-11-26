@@ -59,7 +59,14 @@ class FleetWebAPI:
             (f"{self.prefix}/notes", self.note_save, ["POST"],
              "给账号起备注（显示用别名，不影响 platform_id 与库文件）"),
             (f"{self.prefix}/account-overrides", self.overrides_save, ["POST"],
-             "按账号覆盖开关：记录对话 / 总结 / 整理 / 群内私聊记忆 / recall_k"),
+             "按账号覆盖开关：记录对话 / 总结 / 整理 / 群内私聊 / 群共享 / "
+             "检索档 / recall_k"),
+            (f"{self.prefix}/vector/status", self.vector_status, ["GET"],
+             "向量索引状态：模型、已索引 / 活跃条数、最后同步与错误"),
+            (f"{self.prefix}/vector/rebuild", self.vector_rebuild, ["POST"],
+             "清空并重建该账号的向量索引（按批返回，剩余交给后台）"),
+            (f"{self.prefix}/vector/clear", self.vector_clear, ["POST"],
+             "清空该账号的向量索引（记忆本身不受影响）"),
             # ---- 下钻页：进去之后才是 hermes_core 那种内容管理 ----
             (f"{self.prefix}/scopes", self.scopes, ["GET"],
              "该账号下的记忆作用域清单（谁、哪个群、各多少条）"),
@@ -348,6 +355,59 @@ class FleetWebAPI:
             logger.error(f"[hermes_fleet] 保存 {pid} 开关失败:\n{_tb()}")
             return self._fail("写入开关失败，详见插件日志", 500)
         return json_response({"platform_id": pid, "overrides": merged})
+
+    async def vector_status(self):
+        """向量索引状态。`vector` 未配置时也正常返回（enabled=false）。"""
+        pid = str(request.query.get("platform_id") or "").strip()
+        if not pid:
+            return self._fail("缺少 platform_id")
+        if not self.plugin.registry.has_account(pid):
+            return self._fail("该账号不在索引里", 404)
+        try:
+            data = await self.plugin.vector.status(pid)
+        except Exception:
+            logger.error(f"[hermes_fleet] 读取 {pid} 向量状态失败:\n{_tb()}")
+            return self._fail("读取向量状态失败，详见插件日志", 500)
+        return json_response(data)
+
+    async def vector_rebuild(self):
+        """清空并重建一个账号的向量索引。
+
+        按批返回而不是一次跑到底：一个几千条记忆的账号要发几十次 embedding
+        请求，HTTP 请求超时会让页面一直转圈；返回「已索引 / 剩余」之后，
+        剩下的由后台循环接着做，语义是「进度可见」而不是「一次成功」。
+        """
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        if not pid:
+            return self._fail("缺少 platform_id")
+        if not self.plugin.registry.has_account(pid):
+            return self._fail("该账号不在索引里", 404)
+        try:
+            batches = int(body.get("batches", 8))
+        except (TypeError, ValueError):
+            batches = 8
+        batches = min(50, max(1, batches))
+        try:
+            data = await self.plugin.vector.rebuild(pid, batches=batches)
+        except Exception:
+            logger.error(f"[hermes_fleet] 重建 {pid} 向量索引失败:\n{_tb()}")
+            return self._fail("重建向量索引失败，详见插件日志", 500)
+        return json_response({"platform_id": pid, **data})
+
+    async def vector_clear(self):
+        body = await self._body()
+        pid = str(body.get("platform_id") or "").strip()
+        if not pid:
+            return self._fail("缺少 platform_id")
+        if not self.plugin.registry.has_account(pid):
+            return self._fail("该账号不在索引里", 404)
+        try:
+            data = await self.plugin.vector.clear(pid)
+        except Exception:
+            logger.error(f"[hermes_fleet] 清空 {pid} 向量索引失败:\n{_tb()}")
+            return self._fail("清空向量索引失败，详见插件日志", 500)
+        return json_response({"platform_id": pid, **data})
 
     async def probe(self):
         from hermes_fleet.console import merge_probe

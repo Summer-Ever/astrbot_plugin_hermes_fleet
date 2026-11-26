@@ -2,7 +2,7 @@ name: astrbot_plugin_hermes_fleet
 display_name: Hermes 百账号记忆
 desc: 为上百个机器人账号提供互相隔离的长期记忆：每个账号一个独立记忆库，注入常驻设定、自动总结会话、可检索归档记忆
 short_desc: 多账号隔离的长期记忆系统
-version: v0.9.0
+version: v0.10.0
 author: Summer-Ever
 repo: https://github.com/Summer-Ever/astrbot_plugin_hermes_fleet
 astrbot_version: ">=4.0.0"

@@ -16,6 +16,7 @@ dependencies = []
 pythonpath = [
   "packages/contracts/src",
   "packages/recall/src",
+  "packages/vectors/src",
   "packages/memory/src",
   "packages/jobs/src",
   "packages/identity/src",
