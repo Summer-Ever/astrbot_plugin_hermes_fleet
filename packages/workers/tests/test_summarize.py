@@ -119,6 +119,24 @@ class TestTrigger(Base):
         self.assertEqual(out.sessions_done, 1)
         self.db3.close()
 
+    async def test_立刻总结不看条数与静默时间(self) -> None:
+        """面板「立刻总结」是明确要求：1 条、刚说完，也必须真的跑。"""
+        self.db4 = SqliteBotDb(os.path.join(self.tmp, "e.db"))
+        await self.db4.messages.append_batch([
+            Message(bot_id=self.BOT, session_id=SessionId("s1"), role="user",
+                    content="我下周三搬家", ts=self.now, sender_id="u1")
+        ])
+        llm = FakeLlm("[]")
+        w = SessionSummarizer(llm, now=lambda: self.now,
+                              min_messages=8, idle_seconds=6 * 3600)
+        out = await w.run_bot(
+            self.BOT, messages=self.db4.messages, memories=self.db4.memories,
+            identities=self.db4.identities, force=True)
+        self.assertEqual(len(llm.calls), 1, "force 必须绕开条数阈值")
+        self.assertEqual(out.sessions_done, 1)
+        self.assertEqual(out.skipped, 0)
+        self.db4.close()
+
 
 class TestOwnership(Base):
     async def test_私聊模型漏写归属仍归给本人(self) -> None:

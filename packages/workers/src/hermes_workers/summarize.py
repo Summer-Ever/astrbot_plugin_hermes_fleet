@@ -130,8 +130,14 @@ class SessionSummarizer:
         messages: MessageStore,
         memories: MemoryStore,
         identities: IdentityStore,
+        force: bool = False,
     ) -> SummaryOutcome:
-        """处理一个账号下的一批待总结会话。"""
+        """处理一个账号下的一批待总结会话。
+
+        `force=True` 是「立刻总结」用的：用户已经明确要求，就不再看条数与
+        静默时间，有一条算一条（仍然只碰未总结消息，也仍受每轮会话数、
+        单批条数上限约束——那是防跑飞，不是触发门槛）。
+        """
         out = SummaryOutcome()
         try:
             pending = await messages.list_pending_sessions(
@@ -143,7 +149,7 @@ class SessionSummarizer:
 
         out.sessions_seen = len(pending)
         for session_id, count, last_ts in pending:
-            if not await self._should_summarize(count, last_ts):
+            if not force and not await self._should_summarize(count, last_ts):
                 out.skipped += 1
                 continue
             try:

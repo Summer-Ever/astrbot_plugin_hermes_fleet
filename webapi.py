@@ -565,6 +565,9 @@ class FleetWebAPI:
             outcome = await self.plugin.summarizer.run_bot(
                 bot, messages=db.messages, memories=db.memories,
                 identities=db.identities,
+                # 用户点了「立刻总结」就是明确要求：不看条数阈值与静默时间，
+                # 否则攒了 3 条时按下去毫无反应，比没有这个按钮更糟。
+                force=True,
             )
         except Exception:
             logger.error(f"[hermes_fleet] 账号 {pid} 手动总结失败:\n{_tb()}")

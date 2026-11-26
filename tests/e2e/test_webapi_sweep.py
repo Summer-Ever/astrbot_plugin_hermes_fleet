@@ -192,6 +192,20 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         res = await self.routes[route]["handler"]()
         self.assertEqual(res["status"], 400, res)
 
+    async def test_立刻总结不看条数阈值(self) -> None:
+        """按钮的语义是「现在就总结」，不是「条件满足才总结」。"""
+        ev = self.env.event(message="我下周三搬家")
+        await self.env.turn(ev, "我下周三搬家", "好的")
+
+        # 阈值抬到远高于现有条数：不 force 的话这一轮只会 skipped。
+        self.env.plugin.summarizer.min_messages = 50
+        self.env.plugin.summarizer.idle_seconds = 7 * 24 * 3600
+
+        web_request.reset(payload={"platform_id": "qq-01"})
+        res = await self.routes[f"{PREFIX}/actions/summarize"]["handler"]()
+        self.assertEqual(res["status"], 200, res)
+        self.assertGreaterEqual(res["data"]["messages"], 1, res)
+
 
 if __name__ == "__main__":
     unittest.main()

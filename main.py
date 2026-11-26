@@ -1103,7 +1103,8 @@ class HermesFleet(Star):
             return
         yield event.plain_result("开始总结，完成后回报结果……")
         try:
-            note = await self.summarize_pass()
+            # 手动命令＝明确要求，与面板按钮同一语义：不看条数阈值。
+            note = await self.summarize_pass(force=True)
         except Exception as exc:
             yield event.plain_result(f"总结失败：{exc}")
             return
@@ -1155,7 +1156,8 @@ class HermesFleet(Star):
 
     # ------------------------------------------------------------ 后台总结
 
-    async def summarize_pass(self, *, max_bots: int = 25) -> str:
+    async def summarize_pass(self, *, max_bots: int = 25,
+                             force: bool = False) -> str:
         """跑一轮总结：轮流处理各账号，每个账号最多几个会话。
 
         为什么要「轮流」而不是「每轮都从头扫」：100 个账号时，如果每轮都从
@@ -1164,6 +1166,9 @@ class HermesFleet(Star):
 
         为什么单账号失败要吞掉：一个账号的库文件损坏（磁盘满、被外部删了）
         不该让其余 99 个账号永远停止总结。
+
+        `force=True` 供手动入口（面板「立刻总结」、`/fleet 总结`）用：不看
+        条数与静默时间，有多少总结多少。后台循环不传，保持原来的触发条件。
         """
         if not as_flag(self._get_cfg("summarize_enabled", True), True):
             return "自动总结已关闭（配置里打开 summarize_enabled 后生效）"
@@ -1192,6 +1197,7 @@ class HermesFleet(Star):
                     messages=db.messages,
                     memories=db.memories,
                     identities=db.identities,
+                    force=force,
                 )
             except Exception as exc:
                 logger.error(f"[hermes_fleet] 账号 {pid} 总结失败：{exc}")
