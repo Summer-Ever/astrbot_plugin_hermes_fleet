@@ -77,10 +77,14 @@
     return wrap;
   }
 
+  // 向量相关参数在「向量模型」页渲染（见 vector.js）：来源、模型、索引状态
+  // 与这些参数是同一件事，分两页会让人来回找。
+  const VECTOR_GROUP = "向量检索";
+
   function render(groups) {
     const box = $("cfg-groups");
     clear(box);
-    (groups || []).forEach((g) => {
+    (groups || []).filter((g) => g.title !== VECTOR_GROUP).forEach((g) => {
       const panel = el("section", "panel pad");
       panel.appendChild(el("h2", "pane-title", g.title));
       const grid = el("div", "cfg-grid");
@@ -99,9 +103,10 @@
     }
   }
 
-  function collect() {
+  /** 取控件当前值。传 root 只取那一块——设置页与向量页各存各的。 */
+  function collect(root) {
     const values = {};
-    document.querySelectorAll("#cfg-groups [data-key]").forEach((node) => {
+    (root || document).querySelectorAll("[data-key]").forEach((node) => {
       const kind = node.dataset.kind;
       if (kind === "bool") values[node.dataset.key] = node.checked;
       else values[node.dataset.key] = node.value;
@@ -113,7 +118,7 @@
     const buttons = [$("btn-cfg-save"), $("btn-cfg-save2")];
     buttons.forEach((b) => { b.disabled = true; });
     try {
-      const d = await apiPost("config/save", { values: collect() });
+      const d = await apiPost("config/save", { values: collect($("cfg-groups")) });
       const reload = d.needs_reload || [];
       toast(reload.length
         ? "已保存 " + d.saved.length + " 项；其中 " + reload.length + " 项需重载插件才生效"
@@ -128,6 +133,10 @@
 
   $("btn-cfg-save").addEventListener("click", save);
   $("btn-cfg-save2").addEventListener("click", save);
+
+  // 给「向量模型」页复用同一个控件渲染与取值，避免两页对同一份 schema
+  // 各写一套解析（类型、选项、需重启标记都会漂）。
+  F.configUi = { control, collect, VECTOR_GROUP };
 
   F.pages.settings = { enter() { return load(); } };
 })();

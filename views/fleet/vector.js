@@ -41,6 +41,67 @@
     return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
   }
 
+  /** 后端还是旧版本时，所有新接口都会返回「未找到该路由」。
+   *  这不是页面 bug，而是 Python 代码在插件加载时就固化了——静态页面
+   *  每次都从磁盘读，所以页面看起来是新的、接口却不存在。 */
+  function routeHint(err) {
+    const msg = String((err && err.message) || err || "");
+    if (!/路由|not\s*found|404/i.test(msg)) return;
+    const box = $("vec-notice");
+    box.textContent = "后端接口还是旧版本：" + msg +
+      "。请在 AstrBot 插件管理里重载本插件（或重启 AstrBot），再刷新本页。";
+    box.classList.remove("hidden");
+  }
+
+  // ---------------------------------------------------------------- 配置
+
+  async function loadConfig() {
+    const box = $("vec-config");
+    const ui = F.configUi;
+    if (!box || !ui) return;
+    try {
+      const d = await apiGet("config");
+      const groups = (d.groups || []).filter((g) => g.title === ui.VECTOR_GROUP);
+      clear(box);
+      if (!groups.length) {
+        box.appendChild(el("div", "hint", "没有找到向量相关配置项。"));
+        return;
+      }
+      groups.forEach((g) => {
+        const grid = el("div", "cfg-grid");
+        g.items.forEach((it) => grid.appendChild(ui.control(it)));
+        box.appendChild(grid);
+      });
+      $("vec-config-msg").textContent = "";
+    } catch (err) {
+      clear(box);
+      box.appendChild(el("div", "hint", "读取配置失败：" + errMsg(err)));
+      routeHint(err);
+    }
+  }
+
+  async function saveConfig() {
+    const ui = F.configUi;
+    if (!ui) return;
+    const btn = $("btn-vec-config-save");
+    const msg = $("vec-config-msg");
+    btn.disabled = true;
+    try {
+      const d = await apiPost("config/save", { values: ui.collect($("vec-config")) });
+      const reload = d.needs_reload || [];
+      msg.textContent = reload.length
+        ? "已保存 " + d.saved.length + " 项；其中 " + reload.length + " 项需重载插件才生效"
+        : "已保存 " + d.saved.length + " 项";
+      toast(reload.length ? "已保存，" + reload.length + " 项需重载插件" : "设置已保存");
+      await loadConfig();
+    } catch (err) {
+      toast("保存失败：" + errMsg(err), true);
+      routeHint(err);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // ---------------------------------------------------------------- 状态
 
   function rows(box, pairs) {
@@ -111,6 +172,7 @@
       renderStatus(await apiGet("local-vector/status"));
     } catch (err) {
       rows($("vec-status"), [["运行状态", "读取失败：" + errMsg(err)]]);
+      routeHint(err);
     }
   }
 
@@ -158,6 +220,7 @@
       }
     } catch (err) {
       toast(label + "失败：" + errMsg(err), true);
+      routeHint(err);
     } finally {
       st.busy = false;
       await loadStatus();
@@ -262,8 +325,10 @@
   $("btn-vec-refresh").addEventListener("click", async () => {
     await loadStatus();
     await loadLogs();
+    await loadConfig();
     toast("已刷新");
   });
+  $("btn-vec-config-save").addEventListener("click", saveConfig);
   $("btn-vec-install").addEventListener("click",
     () => act("local-vector/install", "下载"));
   $("btn-vec-start").addEventListener("click",
@@ -289,6 +354,7 @@
       st.entering = true;
       try {
         await loadAccounts();
+        await loadConfig();
         await loadStatus();
         await loadLogs();
         if ($("vec-account").value) await loadAccountStatus();

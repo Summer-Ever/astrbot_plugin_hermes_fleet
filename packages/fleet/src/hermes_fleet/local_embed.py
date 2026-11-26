@@ -80,7 +80,7 @@ RUNTIME_SPEC = DownloadSpec(
     url=("https://github.com/ggml-org/llama.cpp/releases/download/b12359/"
          "llama-b12359-bin-win-cpu-x64.zip"),
     filename="llama-b12359-bin-win-cpu-x64.zip",
-    sha256="837C1655E87DF3B66989F4BE33BAE792A1399C785BF259038DC75C900096683E69".lower(),
+    sha256="837c1655e87df3b66989f4be33a792a1399c785bf259038dc75c900096683e69",
     unpack=True,
 )
 
@@ -90,7 +90,7 @@ MODEL_SPEC = DownloadSpec(
     url=("https://huggingface.co/CompendiumLabs/bge-small-zh-v1.5-gguf/"
          "resolve/main/bge-small-zh-v1.5-q8_0.gguf"),
     filename="bge-small-zh-v1.5-q8_0.gguf",
-    sha256="5A88D266870FBD27C6F329DF60DE80E2D4CF3BBD5E6F080BD5C1B2E5ABB12039".lower(),
+    sha256="5a88d266870fbd27c6f329df60de80e2d4cf3bbd5e6f080bd5c1b2e5abb12039",
 )
 
 
@@ -150,6 +150,144 @@ def _safe_extract(archive: str, target: str) -> None:
         zf.extractall(target)
 
 
+# ---------------------------------------------------------------- 进程守护
+
+_JOB_HANDLE = None
+
+
+def _windows_job():
+    """创建一个「本进程退出 → 子进程一起被杀」的 Job 对象。
+
+    正常关插件走 `terminate()`，会显式停掉模型；但宿主被强杀 / 蓝屏重启
+    这类场景没有优雅收尾，子进程会变成孤儿继续占着 500MB 内存和端口。
+    Windows 的 Job 对象由内核兜底：持有它的进程一消失，子进程立刻被结束。
+    """
+    global _JOB_HANDLE
+    if os.name != "nt":
+        return None
+    if _JOB_HANDLE is not None:
+        return _JOB_HANDLE
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _Basic(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class _Extended(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _Basic),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        ok = k32.SetInformationJobObject(
+            job, 9, ctypes.byref(info), ctypes.sizeof(info))  # ExtendedLimit
+        if not ok:
+            k32.CloseHandle(job)
+            return None
+        _JOB_HANDLE = job  # 句柄必须活到进程结束，不能只放在局部变量里
+        return job
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    if int(pid) <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        handle = k32.OpenProcess(0x00100000 | 0x1000, False, int(pid))
+        if not handle:
+            return False
+        try:
+            return k32.WaitForSingleObject(handle, 0) == 258  # WAIT_TIMEOUT
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def _pid_image(pid: int) -> str:
+    """进程可执行文件名（小写）。拿不到就返回空串——此时宁可不动它。"""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        handle = k32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFO
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if not k32.QueryFullProcessImageNameW(
+                    handle, 0, buf, ctypes.byref(size)):
+                return ""
+            return os.path.basename(buf.value).lower()
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        return os.path.basename(os.readlink(f"/proc/{int(pid)}/exe")).lower()
+    except OSError:
+        return ""
+
+
+def _kill_pid(pid: int) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return
+        except Exception:
+            pass
+    try:
+        os.kill(int(pid), 15)
+    except OSError:
+        pass
+
+
 class LocalEmbedManager:
     """一份本机模型的生命周期。构造不会碰磁盘，只有 `install` 才建目录。"""
 
@@ -171,6 +309,8 @@ class LocalEmbedManager:
         self.runtime_dir = os.path.join(self.root, "runtime")
         self.model_dir = os.path.join(self.root, "models")
         self.model_path = os.path.join(self.model_dir, model_spec.filename)
+        # 上次拉起的进程号/端口。宿主被强杀时靠它认出并清理遗留进程。
+        self.state_path = os.path.join(self.root, "server.json")
         self.runtime_spec = runtime_spec
         self.model_spec = model_spec
         self.model_name = LOCAL_MODEL_NAME
@@ -193,6 +333,10 @@ class LocalEmbedManager:
         self._progress = {"stage": "", "done": 0, "total": 0, "percent": 0}
         self._installing = False
         self._install_thread: threading.Thread | None = None
+        # 用户手动点过「停止」：守护循环不能再把它拉起来，否则点了没用。
+        self._user_stopped = False
+        self._fail_count = 0
+        self._next_try = 0.0
 
     # ------------------------------------------------------------ 路径
 
@@ -252,6 +396,7 @@ class LocalEmbedManager:
                 "runtime_installed": self.runtime_installed,
                 "model_installed": self.model_installed,
                 "installing": self._installing,
+                "user_stopped": self._user_stopped,
                 "model": self.model_name if self.model_installed else "",
                 "dim": self.dim if self.ready else 0,
                 "port": self._port if self.ready else 0,
@@ -282,6 +427,56 @@ class LocalEmbedManager:
         with self._lock:
             self._seq += 1
             self._lines.append((self._seq, self._clock(), text))
+
+    # ------------------------------------------------------------ 遗留进程
+
+    def _read_state(self) -> dict:
+        try:
+            with open(self.state_path, encoding="utf-8") as fp:
+                data = json.load(fp)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_state(self, pid: int, port: int) -> None:
+        tmp = self.state_path + ".tmp"
+        try:
+            os.makedirs(self.root, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fp:
+                json.dump({
+                    "pid": int(pid), "port": int(port),
+                    "exe": os.path.basename(self.runtime_exe),
+                    "model": self.model_name, "ts": self._clock(),
+                }, fp, ensure_ascii=False)
+            os.replace(tmp, self.state_path)
+        except OSError:
+            pass
+
+    def _clear_state(self) -> None:
+        try:
+            os.remove(self.state_path)
+        except OSError:
+            pass
+
+    def _reap_stale(self) -> None:
+        """上一次宿主被强杀留下的模型进程：先结束它再拉起新的。"""
+        state = self._read_state()
+        pid = int(state.get("pid") or 0)
+        if pid <= 0:
+            return
+        current = int(getattr(self._proc, "pid", 0) or 0) if self._proc else 0
+        if pid == current or not _pid_alive(pid):
+            self._clear_state()
+            return
+        image = _pid_image(pid)
+        if image and not image.startswith("llama-server"):
+            # pid 被别的程序复用了：不能动它，只把过期记录清掉。
+            self._append(f"[local] 遗留的 pid {pid} 已属于 {image}，忽略")
+            self._clear_state()
+            return
+        self._append(f"[local] 结束上次遗留的模型进程 {pid}")
+        _kill_pid(pid)
+        self._clear_state()
 
     # ------------------------------------------------------------ 安装
 
@@ -403,6 +598,7 @@ class LocalEmbedManager:
         return self.ready
 
     def start(self, timeout: float = 25.0) -> dict:
+        self._user_stopped = False
         try:
             self.ensure_ready(timeout)
         except LocalEmbedError as exc:
@@ -411,7 +607,27 @@ class LocalEmbedManager:
                 self._error = str(exc)
         return self.status()
 
-    def stop(self) -> dict:
+    def ensure_alive(self, timeout: float = 60.0) -> bool:
+        """守护用：装了就该在跑。用户手动停过、或失败太频繁时不动。"""
+        if self.ready:
+            return True
+        if self._user_stopped or not self.installed:
+            return False
+        if time.monotonic() < self._next_try:
+            return False
+        self.start(timeout=timeout)
+        if self.ready:
+            self._fail_count = 0
+            self._next_try = 0.0
+            return True
+        self._fail_count += 1
+        # 起不来时退避 1→2→4…→10 分钟，避免每分钟刷一次同样的失败日志。
+        self._next_try = time.monotonic() + min(600.0, 60.0 * self._fail_count)
+        return False
+
+    def stop(self, *, user: bool = False) -> dict:
+        if user:
+            self._user_stopped = True
         with self._lock:
             proc = self._proc
             self._proc = None
@@ -430,6 +646,9 @@ class LocalEmbedManager:
                 except Exception:
                     pass
             self._append("[local] 服务已停止")
+            # 只清自己停掉的那条记录；没有 proc 时可能是上次遗留的，
+            # 留着让下一次启动去清理。
+            self._clear_state()
         with self._lock:
             if self._state != "error":
                 self._state = "stopped"
@@ -440,6 +659,7 @@ class LocalEmbedManager:
         return self.start(timeout)
 
     def _start_locked(self, timeout: float) -> None:
+        self._reap_stale()
         old = self._proc
         if old is not None:
             try:
@@ -486,6 +706,8 @@ class LocalEmbedManager:
             self._port = port
             self._state = "starting"
             self._error = ""
+        self._attach_job(proc)
+        self._write_state(int(getattr(proc, "pid", 0) or 0), port)
         reader = threading.Thread(target=self._read_output, args=(proc,),
                                   name="hermes-local-embed-log", daemon=True)
         reader.start()
@@ -498,6 +720,7 @@ class LocalEmbedManager:
                 with self._lock:
                     self._state = "error"
                     self._error = msg
+                self._clear_state()
                 raise LocalEmbedError(msg)
             if self._healthy(port):
                 with self._lock:
@@ -514,12 +737,32 @@ class LocalEmbedManager:
             proc.terminate()
         except Exception:
             pass
+        self._clear_state()
         with self._lock:
             self._proc = None
             self._port = 0
             self._state = "error"
             self._error = msg
         raise LocalEmbedError(msg)
+
+    def _attach_job(self, proc) -> None:
+        """把子进程放进 Job：本进程无论怎么退出，它都会被内核收掉。"""
+        if os.name != "nt":
+            return
+        job = _windows_job()
+        handle = getattr(proc, "_handle", None)
+        if not job or not handle:
+            return
+        import ctypes
+
+        try:
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            if not k32.AssignProcessToJobObject(job, int(handle)):
+                self._append(
+                    f"[local] 绑定 Job 失败（err={ctypes.get_last_error()}）："
+                    "宿主被强杀时可能留下进程，下次启动会自动清理")
+        except Exception:
+            pass
 
     def _read_output(self, proc) -> None:
         stream = getattr(proc, "stdout", None)

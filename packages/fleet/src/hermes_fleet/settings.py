@@ -17,13 +17,15 @@ from typing import Any
 # 这样以后加配置项忘了归类也只是排到末尾，而不是在页面上消失。
 GROUPS: list[tuple[str, list[str]]] = [
     ("记忆注入", ["memory_injection", "inject_to_system_prompt", "capture_messages",
-                  "recall_k", "recall_mode", "group_private_memory",
+                  "recall_k", "group_private_memory",
                   "group_memory_shared",
                   "resident_block_max_chars", "resident_intimacy_max_chars"]),
-    ("向量检索", ["vector_provider", "vector_base_url", "vector_api_key",
-                  "vector_model", "vector_dim", "vector_batch_size",
-                  "vector_timeout_seconds", "vector_query_timeout_seconds",
-                  "vector_sync_minutes",
+    # 这一组在「向量模型」页渲染，不放设置页：模型来源、下载与否、索引状态
+    # 和这些参数是同一件事，分两页会让人来回找。
+    ("向量检索", ["recall_mode", "vector_provider", "vector_base_url",
+                  "vector_api_key", "vector_model", "vector_dim",
+                  "vector_batch_size", "vector_timeout_seconds",
+                  "vector_query_timeout_seconds", "vector_sync_minutes",
                   "vector_sync_bots", "vector_sync_batch", "vector_min_score"]),
     ("存储与容量", ["bot_db_dir", "max_open_bots", "account_stale_days"]),
     ("后台总结", ["summarize_enabled", "summarize_interval_minutes",

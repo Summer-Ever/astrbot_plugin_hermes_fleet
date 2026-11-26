@@ -337,6 +337,7 @@ class HermesFleet(Star):
         )
         self._bg_task: asyncio.Task | None = None
         self._vector_task: asyncio.Task | None = None
+        self._local_task: asyncio.Task | None = None
         self._bot_cursor = 0
         self.consolidator = MemoryConsolidator(
             self.provider,
@@ -1429,24 +1430,32 @@ class HermesFleet(Star):
         if self.vector.configured:
             self._vector_task = asyncio.create_task(self._vector_loop())
             logger.info(f"[hermes_fleet] 向量索引已启动：{self.vector.describe()}")
-            if self.vector.settings.provider == "local" and self.local_embed.installed:
-                # 已经下载过就静默拉起；失败只降级，不阻塞插件加载。
-                asyncio.create_task(asyncio.to_thread(self._start_local_embed))
+        if self.vector.settings.provider == "local":
+            # 插件开着，本机模型就该在跑：启动即拉起，崩溃后自动重试。
+            self._local_task = asyncio.create_task(self._local_guard_loop())
 
-    def _start_local_embed(self) -> None:
-        """启动本机向量模型（在后台线程里调，失败只打日志）。"""
-        try:
-            st = self.local_embed.start(timeout=60.0)
-            if st.get("ready"):
-                logger.info(
-                    f"[hermes_fleet] 本机向量模型已就绪：端口 {st.get('port')}")
-            else:
-                logger.warning(
-                    f"[hermes_fleet] 本机向量模型未就绪：{st.get('last_error')}")
-        except Exception:
-            logger.error(
-                f"[hermes_fleet] 启动本机向量模型异常：\n"
-                f"{traceback.format_exc(limit=4)}")
+    async def _local_guard_loop(self) -> None:
+        """本机模型的守护循环：装了就该在跑。
+
+        - 插件启动后 2 秒拉起（已装好时），不等第一次索引轮次；
+        - 进程意外退出 → 约一分钟内重试，连续失败按 1/2/4…10 分钟退避；
+        - 用户手动点过「停止」→ 不再拉起，直到用户点「启动」。
+
+        它解决的是「前后冲突」的另一半：关插件时 `terminate()` 已经停掉
+        子进程；这里保证开插件之后一定会有一个（且只有一个）在跑。
+        """
+        await asyncio.sleep(2)
+        while True:
+            try:
+                if self.local_embed.installed and not self.local_embed.ready:
+                    await asyncio.to_thread(self.local_embed.ensure_alive, 60.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error(
+                    f"[hermes_fleet] 本机向量模型守护异常：\n"
+                    f"{traceback.format_exc(limit=4)}")
+            await asyncio.sleep(60)
 
     def backup_root(self) -> str:
         """备份落点：放在 `plugin_data/<插件>` 之外。
@@ -1513,6 +1522,13 @@ class HermesFleet(Star):
             except (asyncio.CancelledError, Exception):
                 pass
             self._vector_task = None
+        if self._local_task is not None:
+            self._local_task.cancel()
+            try:
+                await self._local_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._local_task = None
         # 旁路库先于记忆库关闭：后台任务已经停了，这里只剩本地文件句柄。
         self.vector.close()
         # 本机模型是我们拉起的子进程，必须显式收掉，否则重载会留一堆孤儿。

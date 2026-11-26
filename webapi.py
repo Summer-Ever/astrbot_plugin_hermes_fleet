@@ -487,7 +487,7 @@ class FleetWebAPI:
         if man is None:
             return self._fail("本机向量模型组件未初始化", 500)
         try:
-            data = await asyncio.to_thread(man.stop)
+            data = await asyncio.to_thread(lambda: man.stop(user=True))
         except Exception:
             logger.error(f"[hermes_fleet] 停止本机模型失败:\n{_tb()}")
             return self._fail("停止失败，详见插件日志", 500)

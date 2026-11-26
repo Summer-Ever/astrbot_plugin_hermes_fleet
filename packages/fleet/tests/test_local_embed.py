@@ -19,6 +19,8 @@ import zipfile
 
 from hermes_fleet.local_embed import (
     LOCAL_MODEL_NAME,
+    MODEL_SPEC,
+    RUNTIME_SPEC,
     DownloadSpec,
     LocalEmbedder,
     LocalEmbedError,
@@ -106,6 +108,18 @@ class Base(unittest.IsolatedAsyncioTestCase):
         os.makedirs(man.model_dir, exist_ok=True)
         with open(man.model_path, "wb") as fp:
             fp.write(self.model_bytes)
+
+
+class TestSpecs(unittest.TestCase):
+    def test_哈希是合法的_64_位十六进制(self) -> None:
+        """抄 sha256 时多一位/少一位，下载永远校验失败，且报错只显示前 12 位。
+
+        真实事故：运行库的常量多了一位，页面一直提示「校验失败」而前缀
+        看起来完全正确。这里直接把长度和字符集钉死。
+        """
+        for spec in (RUNTIME_SPEC, MODEL_SPEC):
+            with self.subTest(spec=spec.key):
+                self.assertRegex(spec.sha256, r"^[0-9a-f]{64}$")
 
 
 class TestInstall(Base):
@@ -218,6 +232,54 @@ class TestRun(Base):
             fp.write(b"half")
         self.assertEqual(man.cleanup_partials(), 1)
         self.assertFalse(os.path.exists(part))
+
+    def test_就绪后写下进程记录(self) -> None:
+        """宿主被强杀时，这份记录是下次启动清理遗留进程的唯一线索。"""
+        man = self.manager(popen=lambda *a, **kw: _Proc(),
+                           healthy=lambda port: True)
+        self.fake_install(man)
+        man.ensure_ready(5.0)
+        state = man._read_state()
+        self.assertEqual(state.get("pid"), 4321)
+        self.assertGreater(state.get("port") or 0, 0)
+        man.stop()
+        self.assertFalse(os.path.exists(man.state_path))
+
+
+class TestGuard(Base):
+    def test_用户停止后守护不再拉起(self) -> None:
+        man = self.manager(popen=lambda *a, **kw: _Proc(),
+                           healthy=lambda port: True)
+        self.fake_install(man)
+        man.ensure_ready(5.0)
+        man.stop(user=True)
+
+        self.assertTrue(man.status()["user_stopped"])
+        self.assertFalse(man.ensure_alive(1.0), "用户点过停止，守护不能自作主张")
+
+    def test_启动会清除用户停止标记(self) -> None:
+        man = self.manager(popen=lambda *a, **kw: _Proc(),
+                           healthy=lambda port: True)
+        self.fake_install(man)
+        man.stop(user=True)
+        man.start(5.0)
+        self.assertFalse(man.status()["user_stopped"])
+        self.assertTrue(man.ready)
+
+    def test_遗留进程_pid_被别的程序复用时不动它(self) -> None:
+        """pid 会被复用：认出不是 llama-server 就只能清记录，不能杀。"""
+        man = self.manager()
+        os.makedirs(man.root, exist_ok=True)
+        man._write_state(os.getpid(), 1)  # 当前 Python 进程，一定活着
+        man._reap_stale()
+        self.assertFalse(os.path.exists(man.state_path))
+
+    def test_遗留进程已不存在时只清记录(self) -> None:
+        man = self.manager()
+        os.makedirs(man.root, exist_ok=True)
+        man._write_state(999_999_999, 1)
+        man._reap_stale()
+        self.assertFalse(os.path.exists(man.state_path))
 
 
 class TestLocalWiring(Base):
