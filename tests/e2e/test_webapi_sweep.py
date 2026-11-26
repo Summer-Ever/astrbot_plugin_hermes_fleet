@@ -1,4 +1,4 @@
-"""管理台路由扫雷：35 条接口逐条真调用，不允许未捕获异常或 500。
+"""管理台路由扫雷：41 条接口逐条真调用，不允许未捕获异常或 500。
 
 为什么值得单独一层：`webapi.py` 是「页面点了没反应」的高发区，而它的
 单元测试（`console` / `admin`）只测纯逻辑，测不到「handler 名称写错、
@@ -37,7 +37,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         load_main()
 
     async def asyncSetUp(self) -> None:
-        # 35 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
+        # 41 条路由串行跑完约 0.1s，正好压在 asyncio debug 的慢任务阈值上。
         # 这不是卡顿，调高阈值免得每次 CI 都刷一条误导性的告警。
         asyncio.get_running_loop().slow_callback_duration = 5.0
         self.env = PluginEnv()
@@ -48,7 +48,7 @@ class WebAPISweepTest(unittest.IsolatedAsyncioTestCase):
         await self.env.close()
 
     async def test_空参数逐条调用不崩(self) -> None:
-        self.assertEqual(len(self.routes), 35, f"路由变了：{sorted(self.routes)}")
+        self.assertEqual(len(self.routes), 41, f"路由变了：{sorted(self.routes)}")
 
         failures: list[str] = []
         for route in sorted(self.routes):

@@ -18,8 +18,12 @@
       </div>
 
       <nav class="nav" id="nav">
+        <div class="nav-sec">记忆数据</div>
         <a href="#/" data-nav="accounts"><span class="dot"></span>账号台</a>
+        <div class="nav-sec">模型与索引</div>
+        <a href="#/vector" data-nav="vector"><span class="dot"></span>向量模型</a>
         <a href="#/models" data-nav="models"><span class="dot"></span>模型链</a>
+        <div class="nav-sec">系统</div>
         <a href="#/settings" data-nav="settings"><span class="dot"></span>设置</a>
       </nav>
 
@@ -260,16 +264,16 @@
             </div>
             <div class="card">
               <h3>向量索引</h3>
-              <p>把归档记忆向量化后，字面检索凑不满条数时会按语义相似度补齐。
-                索引存在旁路库 <code>vectors.db</code> 里，与记忆本身分离：
-                删掉或重建都不影响已有记忆。</p>
+              <p>把归档记忆向量化后，「数据库模式」为向量版的账号只走向量检索；
+                经典版账号完全不用它。索引存在旁路库 <code>vectors.db</code> 里，
+                与记忆本身分离：删掉或重建都不影响已有记忆。</p>
               <dl class="kv" id="vector-status"></dl>
               <div class="toolbar">
                 <button class="btn" id="btn-vector-rebuild">重建索引</button>
                 <button class="btn ghost" id="btn-vector-clear">清除索引</button>
               </div>
-              <div class="hint">重建按批执行：页面显示已索引 / 剩余条数，剩下的由后台
-                每轮继续。只有把「检索模式」设为向量补齐的账号才会建索引。</div>
+              <div class="hint">本机模型请先到侧栏「向量模型」页下载并启动；
+                重建按批执行：页面显示已索引 / 剩余条数，剩下的由后台每轮继续。</div>
               <div class="result" id="vector-result"></div>
             </div>
             <div class="card">
@@ -278,6 +282,65 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 向量模型 -->
+      <section class="view hidden" id="view-vector">
+        <header class="topbar">
+          <div>
+            <h1>向量模型</h1>
+            <p>本机模型的下载与运行状态；向量库按账号单独维护</p>
+          </div>
+          <div class="top-actions">
+            <button class="btn ghost" id="btn-vec-refresh">刷新</button>
+          </div>
+        </header>
+
+        <section class="panel pad">
+          <div class="panel-head">
+            <h2 class="pane-title">本机模型</h2>
+            <span class="hint" id="vec-mode-hint">—</span>
+          </div>
+          <dl class="kv" id="vec-status"></dl>
+          <div class="vec-progress hidden" id="vec-progress">
+            <div class="bar" id="vec-bar"></div>
+            <span class="hint" id="vec-progress-text">—</span>
+          </div>
+          <div class="toolbar">
+            <button class="btn primary" id="btn-vec-install">下载并启动</button>
+            <button class="btn" id="btn-vec-start">启动</button>
+            <button class="btn ghost" id="btn-vec-stop">停止</button>
+            <button class="btn ghost" id="btn-vec-restart">重启</button>
+          </div>
+          <div class="hint">首次使用需下载约 50MB（运行库 + 中文模型），只下载一次；
+            下载完会自动校验 sha256 并启动。模型文件不进插件包，放在插件数据目录的
+            <code>local_embed/</code> 下，卸载时勾「删除数据」即可一并清理。</div>
+        </section>
+
+        <section class="panel pad">
+          <div class="panel-head">
+            <h2 class="pane-title">向量库操作</h2>
+            <span class="hint">只影响选中账号的旁路索引，不动记忆本身</span>
+          </div>
+          <div class="toolbar">
+            <select class="input grow" id="vec-account"></select>
+            <button class="btn ghost" id="btn-vec-load">查看状态</button>
+            <button class="btn" id="btn-vec-rebuild" disabled>重建索引</button>
+            <button class="btn danger" id="btn-vec-clear" disabled>清除索引</button>
+          </div>
+          <dl class="kv" id="vec-account-status"></dl>
+          <div class="result" id="vec-result"></div>
+          <div class="hint">只有「数据库模式」设为「向量版」的账号才会被后台建索引；
+            其余账号保留字面检索，不产生任何 embedding 调用。</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="pane-title">运行日志</h2>
+            <span class="hint">进入本页后每秒增量拉取，只保留最近 800 行</span>
+          </div>
+          <pre class="logbox" id="vec-log"></pre>
+        </section>
       </section>
 
       <!-- ---------------------------------------------------------- 模型链 -->
@@ -393,6 +456,7 @@
        app.js 里是惰性读取 + 启动时等待，不依赖加载顺序。 -->
   <script src="./app.js"></script>
   <script src="./detail.js"></script>
+  <script src="./vector.js"></script>
   <script src="./models.js"></script>
   <script src="./settings.js"></script>
 </body>

@@ -342,6 +342,13 @@ button, input, select { font: inherit; color: inherit; }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
 
+/* 分组标题：侧栏条目变多之后，靠缩进和留白区分「这是另一类页面」。 */
+.nav-sec {
+  margin: 10px 10px 2px; font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--faint); font-weight: 600;
+}
+.nav-sec:first-child { margin-top: 0; }
+
 .nav a {
   display: flex; align-items: center; gap: 9px;
   padding: 8px 10px; border-radius: 8px; text-decoration: none;
@@ -659,4 +666,44 @@ button, input, select { font: inherit; color: inherit; }
 .cfg-key { font-size: 12.5px; font-weight: 600; }
 .cfg-item .input { width: 100%; }
 .cfg-list { min-height: 58px; resize: vertical; font-size: 12.5px; }
+
+/* ================================================================ v0.7
+   页面级的呼吸感 + 向量模型页。之前多个 .panel 直接相邻，国内常见的
+   「一屏全是卡片、分不清哪块属于哪块」就是这么来的。 */
+#cfg-groups { display: flex; flex-direction: column; gap: 14px; }
+#cfg-groups > .panel { margin: 0; }
+
+.view > .panel + .panel,
+.view > .panel + .cards,
+.view > .cards + .panel,
+.view > .counters + .panel { margin-top: 14px; }
+
+.view .panel .toolbar:last-child { margin-bottom: 0; }
+.view .panel > .toolbar { margin-top: 10px; }
+
+/* 本机模型下载进度 */
+.vec-progress {
+  display: flex; align-items: center; gap: 10px; margin: 10px 0 2px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 8px;
+}
+.vec-progress .bar {
+  height: 6px; width: 0; border-radius: 999px;
+  background: var(--accent); transition: width .25s ease;
+  flex: 0 0 auto; min-width: 0; max-width: 60%;
+}
+.vec-progress .hint { flex: 1; min-width: 0; }
+
+/* 滚动日志：等宽、深色底、只保留最近若干行，自动滚到最新。
+   高度用 vh 而不是固定 px，窄屏也不会把下面的内容顶出屏幕。 */
+.logbox {
+  margin: 0 14px 14px; padding: 10px 12px; height: min(320px, 42vh);
+  overflow: auto; border: 1px solid var(--border); border-radius: 10px;
+  background: #0f1218; color: #d5dbe6;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-all;
+}
+html[data-theme="light"] .logbox { background: #0f1218; }
+.logbox .logline { padding: 1px 0; }
+.logbox .logline:nth-child(even) { background: rgba(255, 255, 255, .03); }
 

@@ -42,6 +42,7 @@ from hermes_vectors import (
     pack,
 )
 
+from .local_embed import LOCAL_MODEL_NAME, LocalEmbedder, LocalEmbedManager
 from .registry import BotRegistry, bot_id_of
 from .service import Scene
 
@@ -100,7 +101,9 @@ class VectorSettings:
 
     def __post_init__(self) -> None:
         provider = str(self.provider or "off").strip().lower()
-        object.__setattr__(self, "provider", provider if provider in ("off", "api") else "off")
+        object.__setattr__(
+            self, "provider",
+            provider if provider in ("off", "api", "local") else "off")
         object.__setattr__(self, "base_url", str(self.base_url or "").strip().rstrip("/"))
         object.__setattr__(self, "api_key", str(self.api_key or "").strip())
         object.__setattr__(self, "model", str(self.model or "").strip())
@@ -141,13 +144,25 @@ class VectorSettings:
         )
 
     @property
+    def model_name(self) -> str:
+        """写进索引 meta 的模型标识。本机模型的「型号」是固定的。"""
+        if self.provider == "local":
+            return self.model or LOCAL_MODEL_NAME
+        return self.model
+
+    @property
     def enabled(self) -> bool:
-        return self.provider == "api" and bool(self.base_url and self.model)
+        """是否选了可用的来源。本机模型是否**已启动**由 VectorGlue 判断。"""
+        if self.provider == "api":
+            return bool(self.base_url and self.model)
+        if self.provider == "local":
+            return True
+        return False
 
     @property
     def embed(self) -> EmbeddingConfig:
         return EmbeddingConfig(
-            base_url=self.base_url, model=self.model, api_key=self.api_key,
+            base_url=self.base_url, model=self.model_name, api_key=self.api_key,
             dim=self.dim, batch_size=self.batch_size, timeout_s=self.timeout_s,
         )
 
@@ -157,10 +172,15 @@ class VectorGlue:
 
     def __init__(self, registry: BotRegistry, settings: VectorSettings, *,
                  log: Callable[[str], None] | None = None,
-                 embedder: EmbeddingClient | None = None,
+                 embedder: EmbeddingClient | LocalEmbedder | None = None,
+                 local: LocalEmbedManager | None = None,
                  now: Callable[[], float] | None = None) -> None:
         self.registry = registry
         self.settings = settings
+        self.local = local
+        if embedder is None and settings.provider == "local" and local is not None:
+            embedder = LocalEmbedder(
+                local, batch_size=settings.batch_size, timeout_s=settings.timeout_s)
         self._embedder = embedder or EmbeddingClient(settings.embed)
         self._log = log or (lambda _msg: None)
         self._now = now or time.time
@@ -181,7 +201,32 @@ class VectorGlue:
 
     @property
     def enabled(self) -> bool:
+        """真的能做语义检索/索引：来源配好了，且 embedding 端可用。
+
+        本机模型的「端可用」= 进程已经在跑；没下载或没启动时这里是 False，
+        后台索引轮次与检索都会直接跳过，而不是每轮发一次必然失败的请求。
+        """
+        if not self.settings.enabled:
+            return False
+        return bool(getattr(self._embedder, "enabled", True))
+
+    @property
+    def configured(self) -> bool:
+        """是否选了向量来源（不等 endpoint 是否就绪）。启动后台轮次看它。"""
         return self.settings.enabled
+
+    @property
+    def not_ready_reason(self) -> str:
+        if not self.settings.enabled:
+            return "未启用向量召回：请先在设置里填写 embedding 模型"
+        if self.settings.provider == "local" and self.local is not None:
+            state = str(self.local.status().get("state") or "")
+            if state in ("downloading", "verifying", "starting"):
+                return "本机向量模型正在准备中"
+            if not self.local.installed:
+                return "本机向量模型还没下载，请到「向量模型」页点「下载并启动」"
+            return "本机向量模型没有在运行，请到「向量模型」页启动"
+        return "embedding 服务尚未就绪"
 
     def layout_of(self, platform_id: str) -> str:
         """`v2` / `legacy` / `missing`。
@@ -269,8 +314,9 @@ class VectorGlue:
         out = {
             "platform_id": pid,
             "enabled": self.enabled,
+            "configured": self.configured,
             "provider": self.settings.provider,
-            "model": self.settings.model,
+            "model": self.settings.model_name,
             "dim": self.settings.dim,
             "min_score": self.settings.min_score,
             "numpy": has_numpy(),
@@ -284,6 +330,8 @@ class VectorGlue:
             "stats": dict(self.stats),
             "query_timeout_s": self.settings.query_timeout_s,
         }
+        if not self.enabled:
+            out["not_ready"] = self.not_ready_reason
         if layout != "v2":
             return out
         store = self._store_for(pid, create=False)
@@ -314,7 +362,7 @@ class VectorGlue:
         fast = "" if has_numpy() else " · 未装 numpy，只扫最近窗口"
         return (
             f"{'启用' if self.enabled else '未启用'} · "
-            f"{self.settings.model or '未配置模型'} · "
+            f"{self.settings.model_name or '未配置模型'} · "
             f"相似度门槛 {self.settings.min_score:.2f}{fast}"
         )
 
@@ -448,7 +496,8 @@ class VectorGlue:
         的分数。所以模型或维度一变就整体重建，宁可暂时没有向量召回。
         """
         meta = await asyncio.to_thread(store.meta)
-        model_changed = bool(meta.get("model")) and meta.get("model") != self.settings.model
+        model_name = self.settings.model_name
+        model_changed = bool(meta.get("model")) and meta.get("model") != model_name
         old_dim = _as_int(meta.get("dim"), 0)
         dim_changed = bool(old_dim and self.settings.dim and old_dim != self.settings.dim)
         if model_changed or dim_changed:
@@ -456,7 +505,7 @@ class VectorGlue:
             self._log(
                 f"[hermes_fleet] {platform_id} 的向量模型/维度变了"
                 f"（{meta.get('model')}/{old_dim} → "
-                f"{self.settings.model}/{self.settings.dim}），已清空待重建"
+                f"{model_name}/{self.settings.dim}），已清空待重建"
             )
             return {}
         return meta
@@ -464,8 +513,10 @@ class VectorGlue:
     async def sync_bot(self, platform_id: str, *, budget: int | None = None,
                        store=None) -> dict:
         """对一个账号做一轮增量索引。返回 `{indexed, pending, skipped?}`。"""
-        if not self.enabled:
+        if not self.configured:
             return {"skipped": True, "reason": "disabled", "indexed": 0, "pending": 0}
+        if not self.enabled:
+            return {"skipped": True, "reason": "not_ready", "indexed": 0, "pending": 0}
         store = store or self._store_for(platform_id)
         if store is None:
             return {"skipped": True, "reason": "layout", "indexed": 0, "pending": 0}
@@ -544,7 +595,7 @@ class VectorGlue:
         indexed = await asyncio.to_thread(store.count)
         await asyncio.to_thread(
             store.set_meta,
-            model=self.settings.model,
+            model=self.settings.model_name,
             dim=dim,
             indexed=indexed,
             pending=pending,
@@ -604,7 +655,7 @@ class VectorGlue:
         """清空并重建一个账号的索引。按批返回，避免一次请求跑几分钟。"""
         if not self.enabled:
             return {"enabled": False, "indexed": 0, "pending": 0,
-                    "message": "未启用向量召回：请先在设置里填写 vector_model"}
+                    "message": self.not_ready_reason}
         store = self._store_for(platform_id)
         if store is None:
             return {"enabled": True, "indexed": 0, "pending": 0,

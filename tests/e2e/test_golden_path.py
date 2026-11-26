@@ -135,7 +135,7 @@ class GoldenPathTest(unittest.IsolatedAsyncioTestCase):
     async def test_管理台路由全部注册(self) -> None:
         routes = self.env.register_web_apis()
 
-        self.assertEqual(len(routes), 35, f"路由数量变了：{sorted(routes)}")
+        self.assertEqual(len(routes), 41, f"路由数量变了：{sorted(routes)}")
         overview = "/astrbot_plugin_hermes_fleet/overview"
         self.assertIn(overview, routes)
         self.assertEqual(routes[overview]["methods"], ["GET"])

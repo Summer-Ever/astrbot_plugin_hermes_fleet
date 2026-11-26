@@ -546,19 +546,23 @@
   // ---------------------------------------------------------------- 路由
 
   const pages = {};
+  // 当前页名。用来在切页时调用上一页的 `leave()`——向量页有 1s 轮询，
+  // 不显式停掉的话离开页面后还在持续发请求。
+  let currentPage = "";
 
   function parseHash() {
     const raw = (location.hash || "").replace(/^#\/?/, "");
     if (raw.startsWith("a/")) {
       return { name: "detail", pid: decodeURIComponent(raw.slice(2)) };
     }
+    if (raw.startsWith("vector")) return { name: "vector" };
     if (raw.startsWith("models")) return { name: "models" };
     if (raw.startsWith("settings")) return { name: "settings" };
     return { name: "accounts" };
   }
 
   function showView(name) {
-    ["accounts", "detail", "models", "settings"].forEach((key) => {
+    ["accounts", "detail", "vector", "models", "settings"].forEach((key) => {
       const node = $("view-" + key);
       if (node) node.classList.toggle("hidden", key !== name);
     });
@@ -570,6 +574,13 @@
 
   async function route() {
     const r = parseHash();
+    if (currentPage && currentPage !== r.name) {
+      const prev = pages[currentPage];
+      if (prev && typeof prev.leave === "function") {
+        try { prev.leave(); } catch (_) { /* 页面自己的清理失败不该挡住切页 */ }
+      }
+    }
+    currentPage = r.name;
     showView(r.name);
     const page = pages[r.name];
     if (!page) return;

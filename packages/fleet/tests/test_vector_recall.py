@@ -92,26 +92,27 @@ class TestSemanticFill(Base):
         self.assertEqual(fake.calls, 0)
         self.assertEqual(text.strip(), "")
 
-    async def test_向量档在字面沉默时补齐(self) -> None:
+    async def test_向量档只走向量(self) -> None:
+        """向量版不是「字面 + 补齐」，字面命中的条目也不该混进来。"""
         svc = MemoryService(self.reg, recall_mode="vector")
         scene = await self.scene()
-        memory = await svc.save(scene, "用户养了两只布偶猫")
-        svc._vector_recall = FakeVector([RecallHit(memory=memory, score=0.72)])
+        await svc.save(scene, "用户养了两只布偶猫")
+        dog = await svc.save(scene, "用户养了一只柴犬")
+        svc._vector_recall = FakeVector([RecallHit(memory=dog, score=0.72)])
 
-        text = await svc.search(scene, "宠物")
-        self.assertIn("布偶", text, "字面零命中时应由语义路径补上")
+        text = await svc.search(scene, "布偶猫")
+        self.assertIn("柴犬", text, "向量版应当返回语义命中的那条")
+        self.assertNotIn("布偶", text, "向量版不该再跑字面检索")
 
-    async def test_字面已经够数时不再调向量(self) -> None:
+    async def test_向量档无命中时退回字面(self) -> None:
+        """空库或模型没启动时宁可退化，不能让用户突然「失忆」。"""
         svc = MemoryService(self.reg, recall_mode="vector")
         scene = await self.scene()
-        memory = await svc.save(scene, "用户养了两只布偶猫")
-        fake = FakeVector([RecallHit(memory=memory, score=0.9)])
-        svc._vector_recall = fake
+        await svc.save(scene, "用户养了两只布偶猫")
+        svc._vector_recall = FakeVector([])
 
-        # limit=1：字面第一条就够数，语义路径不该被触发。
-        text = await svc.search(scene, "布偶猫", limit=1)
+        text = await svc.search(scene, "布偶猫")
         self.assertIn("布偶", text)
-        self.assertEqual(fake.calls, 0, "字面够用时不该再付一次向量查询")
 
     async def test_向量故障与_classic_输出一致(self) -> None:
         normal = MemoryService(self.reg)
@@ -123,7 +124,7 @@ class TestSemanticFill(Base):
         broken._vector_recall = FakeVector(error=RuntimeError("boom"))
         self.assertEqual(await broken.search(scene, "宠物"), expected)
 
-    async def test_补进来的条目仍要过可见性(self) -> None:
+    async def test_向量命中仍要过可见性(self) -> None:
         svc = MemoryService(self.reg, recall_mode="vector")
         mine = await self.scene("qq-01", "u1")
         other = await self.scene("qq-01", "u2")
@@ -131,7 +132,7 @@ class TestSemanticFill(Base):
         svc._vector_recall = FakeVector([RecallHit(memory=theirs, score=0.99)])
 
         self.assertEqual((await svc.search(mine, "宠物")).strip(), "",
-                         "语义召回不能绕过归属判断")
+                         "向量召回不能绕过归属判断")
 
     async def test_按账号覆盖检索档(self) -> None:
         svc = MemoryService(
@@ -147,7 +148,7 @@ class TestSemanticFill(Base):
 
         self.assertIn("布偶", await svc.search(a, "宠物"))
         self.assertNotIn("布偶", await svc.search(b, "宠物"))
-        self.assertEqual(fake.calls, 1, "只有开了 vector 的账号才会查向量")
+        self.assertEqual(fake.calls, 1, "只有开了向量版的账号才会查向量")
 
 
 class TestVectorGlue(Base):

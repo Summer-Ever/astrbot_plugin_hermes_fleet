@@ -69,15 +69,15 @@
     "type": "string",
     "default": "classic",
     "options": ["classic", "vector"],
-    "description": "默认检索模式（可按账号覆盖）",
-    "hint": "classic：字面检索（FTS + BM25 精排），零依赖、零额外调用。vector：在字面检索凑不满时，用 embedding 按语义补齐。向量是增益不是依赖：未配置模型或调用失败时自动退回 classic。按账号可在管理台「开关」页覆盖。"
+    "description": "默认数据库模式（可按账号覆盖）",
+    "hint": "classic（经典版）：只走字面检索（FTS + BM25 精排），零依赖、零额外调用，默认就是它。vector（向量版）：只走向量语义检索，需要先配好向量模型；向量库为空或模型没启动时自动退回经典版。按账号可在管理台「开关」页覆盖。"
   },
   "vector_provider": {
     "type": "string",
     "default": "off",
-    "options": ["off", "api"],
+    "options": ["off", "api", "local"],
     "description": "向量模型来源",
-    "hint": "off：不启用。api：调用 OpenAI 兼容的 /embeddings 接口（OpenAI、硅基流动、百炼、Ollama /v1、vLLM 均可）。本地模型请先起一个 Ollama/vLLM 再用 api 接入，插件本身不引入原生依赖。"
+    "hint": "off：不启用。local：本机模型，先到管理台「向量模型」页点「下载并启动」（约 50MB，CPU 推理，不装任何原生依赖）。api：调用 OpenAI 兼容的 /embeddings 接口（OpenAI、硅基流动、百炼、Ollama /v1、vLLM 均可）。"
   },
   "vector_base_url": {
     "type": "string",
@@ -95,7 +95,7 @@
     "type": "string",
     "default": "",
     "description": "embedding 模型名",
-    "hint": "例如 text-embedding-3-small、bge-m3、nomic-embed-text。留空等于不启用（即使 provider 选了 api）。模型名变了会自动清空旧向量并重建——不同模型的向量空间互不相通。"
+    "hint": "api 模式填例如 text-embedding-3-small、bge-m3、nomic-embed-text；留空等于不启用。local 模式留空即用内置的 bge-small-zh-v1.5（512 维），也可以手填一个自定义 gguf 的模型名。模型名变了会自动清空旧向量并重建——不同模型的向量空间互不相通。"
   },
   "vector_dim": {
     "type": "int",

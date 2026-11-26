@@ -752,9 +752,9 @@
   const OV_STATES = [["inherit", "跟随全局"], ["on", "开启"], ["off", "关闭"]];
   // 枚举型覆盖项：值和标签一一对应，保存时 null 表示回到全局。
   const OV_ENUMS = [
-    ["recall_mode", "检索模式", [
-      ["classic", "经典（字面）"],
-      ["vector", "向量补齐"],
+    ["recall_mode", "数据库模式", [
+      ["classic", "经典版（只字面）"],
+      ["vector", "向量版（只语义）"],
     ]],
   ];
 
@@ -1012,7 +1012,8 @@
     clear(box);
     const on = !!d.enabled;
     const rows = [
-      ["状态", on ? "已启用" : "未启用（设置里填写 vector_model 并重启）"],
+      ["状态", on ? "已启用" : (d.not_ready || "未启用（设置里配置向量模型）")],
+      ["来源", d.provider || "—"],
       ["模型", d.model || "—"],
       ["维度", d.dim ? String(d.dim) : "—"],
       ["索引 / 活跃", num(d.indexed) + " / " + num(d.active)],

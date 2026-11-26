@@ -82,5 +82,33 @@ class TestOpsUiContract(unittest.TestCase):
         self.assertIn('openDir("backups"', self.js)
 
 
+class TestVectorUiContract(unittest.TestCase):
+    """向量模型页：脚本里 getElementById 的每个 id 都必须在 HTML 里存在。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = (VIEW_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (VIEW_DIR / "vector.js").read_text(encoding="utf-8")
+
+    def test_页面与导航已挂载(self) -> None:
+        self.assertIn('id="view-vector"', self.html)
+        self.assertIn('data-nav="vector"', self.html)
+        self.assertIn('src="./vector.js"', self.html)
+
+    def test_脚本引用的元素都存在(self) -> None:
+        import re
+
+        ids = set(re.findall(r'\$\("([a-z0-9-]+)"\)', self.js))
+        self.assertTrue(ids)
+        missing = [i for i in sorted(ids) if f'id="{i}"' not in self.html]
+        self.assertEqual(missing, [], f"vector.js 引用了不存在的元素：{missing}")
+
+    def test_离开页面会停掉轮询(self) -> None:
+        # 没有 leave 的话，离开向量页之后仍会每秒发请求。
+        self.assertIn("leave()", self.js)
+        self.assertIn("clearInterval", self.js)
+        self.assertIn("leave", (VIEW_DIR / "app.js").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

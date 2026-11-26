@@ -292,13 +292,28 @@ class MemoryService:
         return True
 
     async def search(self, scene: Scene, query: str, *, limit: int | None = None) -> str:
-        """检索并返回**已渲染成文本**的结果，直接可回给模型。
+        """按该账号的「数据库模式」检索，返回已渲染成文本的结果。
+
+        两档**互斥**，不是叠加：
+
+        - classic（默认）：只走字面（FTS + BM25 精排），零额外调用；
+        - vector：只走向量。库里没有向量或模型没启动时退回字面——
+          「检索不到」比「检索慢一点」严重得多，宁可这一轮退化。
 
         候选池只取 `recall_k * 8` 条，并夹在 `MAX_RERANK` 以内：精排只接受
         ≤50 条（`hermes_recall.MAX_RERANK`）。上限必须在**取候选之前**夹住，
         不能指望 rerank 兜底——它超过 50 是直接抛 ValueError 的，而配置项
         `recall_k` 没有硬上限，k=7 就会把整条检索链路打断。
         """
+        take = limit or self._recall_for(scene)
+        if self._recall_mode_for(scene) == "vector":
+            hits = await self._vector_only(scene, query, take)
+            if hits:
+                return render(hits)
+            # 向量档兜底：空库 / 模型未就绪 / 无命中时仍然给字面结果。
+        return await self._literal(scene, query, take)
+
+    async def _literal(self, scene: Scene, query: str, take: int) -> str:
         db = self._db(scene)
         key = MemoryKey(
             bot_id=scene.bot_id,
@@ -306,7 +321,6 @@ class MemoryService:
             owner_id=str(scene.owner_id),
             group_id=EMPTY,
         )
-        take = limit or self._recall_for(scene)
         pool = min(MAX_RERANK, max(32, take * 8))
         candidates = await db.memories.search_candidates(
             key,
@@ -317,48 +331,30 @@ class MemoryService:
         )
         usable = [m for m in candidates if self._visible(m, scene)]
         hits = rerank(query, usable, k=take, now=self._now())
-        hits = await self._semantic_fill(scene, query, hits, take)
         return render(hits)
 
-    async def _semantic_fill(self, scene: Scene, query: str, hits: list,
-                             take: int) -> list:
-        """字面召回不足时，用向量召回补齐。
-
-        **为什么是「补齐」而不是「并池后再精排」**：精排（`rank_fused`）
-        用 BM25 打分，与问句没有任何字面交集的候选会得到 0 分并被直接丢弃。
-        而向量召回要解决的恰恰就是「词汇鸿沟」——把语义相关、字面不重合的
-        条目并进候选池，它们在精排里仍然是 0 分，等于白做一次昂贵的向量查询。
-
-        所以顺序是：先跑已验证的字面链路（docs/06 里有完整评测），只有当它
-        给不满 `k` 条时才向向量要人，且按余弦相似度排序追加在后面。这样：
-
-        - 字面链路够用时，输出与 classic 完全一致（不引入回归）；
-        - 字面链路沉默时（最典型的「明明记过却想不起来」），语义条目补上；
-        - 向量服务故障时，结果与 classic 完全一致（向量是增益，不是依赖）。
-        """
-        if len(hits) >= take or self._vector_recall is None:
-            return hits
-        if self._recall_mode_for(scene) != "vector":
-            return hits
-        exclude = {int(h.memory.id) for h in hits}
+    async def _vector_only(self, scene: Scene, query: str, take: int) -> list:
+        """只取向量命中。任何失败都返回空列表，由调用方退回字面。"""
+        if self._vector_recall is None:
+            return []
         try:
-            extra = await self._vector_recall.semantic_hits(
-                scene, query, exclude=exclude, limit=take - len(hits)
-            )
+            extra = await self._vector_recall.semantic_hits(scene, query, limit=take)
         except Exception:  # noqa: BLE001 — 语义召回任何失败都不能拖垮检索
-            return hits
+            return []
+        out = []
+        seen: set[int] = set()
         for hit in extra or []:
             try:
                 mid = int(hit.memory.id)
             except Exception:
                 continue
-            if mid in exclude or not self._visible(hit.memory, scene):
+            if mid in seen or not self._visible(hit.memory, scene):
                 continue
-            exclude.add(mid)
-            hits.append(hit)
-            if len(hits) >= take:
+            seen.add(mid)
+            out.append(hit)
+            if len(out) >= take:
                 break
-        return hits
+        return out
 
     # ------------------------------------------------------------ 写记忆
 

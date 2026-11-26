@@ -151,6 +151,7 @@ from hermes_fleet import (  # noqa: E402
     render_help,
 )
 from hermes_fleet.settings import as_flag  # noqa: E402
+from hermes_fleet.local_embed import LocalEmbedManager  # noqa: E402
 from hermes_fleet.vector import VectorGlue, VectorSettings  # noqa: E402
 from hermes_workers import (  # noqa: E402
     ConsolidateOutcome,
@@ -299,11 +300,15 @@ class HermesFleet(Star):
             root, max_open=int(self._get_cfg("max_open_bots", 24))
         )
         # 向量旁路：配置为 off 时它只是个空壳（不开库、不联网）。
-        # 先于 MemoryService 构造，因为 service 需要把它当成「语义补齐」的注入口。
+        # 先于 MemoryService 构造，因为 service 需要把它当成「语义召回」的注入口。
+        # 本机模型是**外部进程**：这里只登记目录，下载/启动由管理台触发。
+        self.local_embed = LocalEmbedManager(
+            _default_data_dir(), log=lambda msg: logger.info(msg))
         self.vector = VectorGlue(
             self.registry,
             VectorSettings.from_config(self._get_cfg),
             log=lambda msg: logger.warning(msg),
+            local=self.local_embed,
         )
         self.svc = MemoryService(
             self.registry,
@@ -1421,9 +1426,27 @@ class HermesFleet(Star):
         if as_flag(self._get_cfg("summarize_enabled", True), True):
             self._bg_task = asyncio.create_task(self._bg_loop())
             logger.info("[hermes_fleet] 自动总结已启动")
-        if self.vector.enabled:
+        if self.vector.configured:
             self._vector_task = asyncio.create_task(self._vector_loop())
             logger.info(f"[hermes_fleet] 向量索引已启动：{self.vector.describe()}")
+            if self.vector.settings.provider == "local" and self.local_embed.installed:
+                # 已经下载过就静默拉起；失败只降级，不阻塞插件加载。
+                asyncio.create_task(asyncio.to_thread(self._start_local_embed))
+
+    def _start_local_embed(self) -> None:
+        """启动本机向量模型（在后台线程里调，失败只打日志）。"""
+        try:
+            st = self.local_embed.start(timeout=60.0)
+            if st.get("ready"):
+                logger.info(
+                    f"[hermes_fleet] 本机向量模型已就绪：端口 {st.get('port')}")
+            else:
+                logger.warning(
+                    f"[hermes_fleet] 本机向量模型未就绪：{st.get('last_error')}")
+        except Exception:
+            logger.error(
+                f"[hermes_fleet] 启动本机向量模型异常：\n"
+                f"{traceback.format_exc(limit=4)}")
 
     def backup_root(self) -> str:
         """备份落点：放在 `plugin_data/<插件>` 之外。
@@ -1492,6 +1515,13 @@ class HermesFleet(Star):
             self._vector_task = None
         # 旁路库先于记忆库关闭：后台任务已经停了，这里只剩本地文件句柄。
         self.vector.close()
+        # 本机模型是我们拉起的子进程，必须显式收掉，否则重载会留一堆孤儿。
+        try:
+            self.local_embed.stop()
+        except Exception:
+            logger.error(
+                f"[hermes_fleet] 停止本机向量模型失败：\n"
+                f"{traceback.format_exc(limit=4)}")
         try:
             self.registry.close_all()
         except Exception:

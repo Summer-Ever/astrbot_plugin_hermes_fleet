@@ -67,6 +67,19 @@ class FleetWebAPI:
              "清空并重建该账号的向量索引（按批返回，剩余交给后台）"),
             (f"{self.prefix}/vector/clear", self.vector_clear, ["POST"],
              "清空该账号的向量索引（记忆本身不受影响）"),
+            # ---- 本机向量模型：下载 / 启停 / 日志 ----
+            (f"{self.prefix}/local-vector/status", self.local_vector_status, ["GET"],
+             "本机向量模型状态：安装、运行、下载进度、监听端口"),
+            (f"{self.prefix}/local-vector/install", self.local_vector_install, ["POST"],
+             "下载运行库与模型（后台进行，进度看 status）"),
+            (f"{self.prefix}/local-vector/start", self.local_vector_start, ["POST"],
+             "启动本机向量模型（已安装才可用）"),
+            (f"{self.prefix}/local-vector/stop", self.local_vector_stop, ["POST"],
+             "停止本机向量模型（释放内存）"),
+            (f"{self.prefix}/local-vector/restart", self.local_vector_restart, ["POST"],
+             "重启本机向量模型"),
+            (f"{self.prefix}/local-vector/logs", self.local_vector_logs, ["GET"],
+             "增量拉取本机模型日志（after=已收到的最大 seq）"),
             # ---- 下钻页：进去之后才是 hermes_core 那种内容管理 ----
             (f"{self.prefix}/scopes", self.scopes, ["GET"],
              "该账号下的记忆作用域清单（谁、哪个群、各多少条）"),
@@ -368,6 +381,10 @@ class FleetWebAPI:
         except Exception:
             logger.error(f"[hermes_fleet] 读取 {pid} 向量状态失败:\n{_tb()}")
             return self._fail("读取向量状态失败，详见插件日志", 500)
+        try:
+            data["recall_mode"] = self.plugin.svc.recall_mode_of(pid)
+        except Exception:
+            data["recall_mode"] = "classic"
         return json_response(data)
 
     async def vector_rebuild(self):
@@ -409,9 +426,104 @@ class FleetWebAPI:
             return self._fail("清空向量索引失败，详见插件日志", 500)
         return json_response({"platform_id": pid, **data})
 
+    # ------------------------------------------------------------ 本机模型
+
+    def _local(self):
+        return getattr(self.plugin, "local_embed", None)
+
+    async def _local_status(self) -> dict:
+        man = self._local()
+        data = man.status() if man is not None else {}
+        data["config_provider"] = str(
+            self._cfg("vector_provider", "off") or "off").strip().lower()
+        try:
+            vector = self.plugin.vector
+            data["provider"] = vector.settings.provider
+            data["configured"] = vector.configured
+            data["vector_enabled"] = vector.enabled
+            if not vector.enabled:
+                data["not_ready"] = vector.not_ready_reason
+        except Exception:
+            data.setdefault("provider", "off")
+            data.setdefault("configured", False)
+            data.setdefault("vector_enabled", False)
+        return data
+
+    async def local_vector_status(self):
+        """状态页轮询用。只读内存与文件存在性，不打开任何记忆库。"""
+        man = self._local()
+        if man is None:
+            return self._fail("本机向量模型组件未初始化", 500)
+        return json_response(await self._local_status())
+
+    async def local_vector_install(self):
+        """开始下载。只有把来源设成 local 才允许，避免误触发 50MB 流量。"""
+        man = self._local()
+        if man is None:
+            return self._fail("本机向量模型组件未初始化", 500)
+        provider = str(self._cfg("vector_provider", "off") or "off").strip().lower()
+        if provider != "local":
+            return self._fail("请先把「向量模型来源」设为 local，并重载插件")
+        try:
+            data = man.install()
+        except Exception:
+            logger.error(f"[hermes_fleet] 启动本机模型下载失败:\n{_tb()}")
+            return self._fail("启动下载失败，详见插件日志", 500)
+        return json_response({**data, "message": "已开始下载，进度会自动刷新"})
+
+    async def local_vector_start(self):
+        man = self._local()
+        if man is None:
+            return self._fail("本机向量模型组件未初始化", 500)
+        try:
+            data = await asyncio.to_thread(man.start, 45.0)
+        except Exception:
+            logger.error(f"[hermes_fleet] 启动本机模型失败:\n{_tb()}")
+            return self._fail("启动失败，详见插件日志", 500)
+        return json_response(data)
+
+    async def local_vector_stop(self):
+        man = self._local()
+        if man is None:
+            return self._fail("本机向量模型组件未初始化", 500)
+        try:
+            data = await asyncio.to_thread(man.stop)
+        except Exception:
+            logger.error(f"[hermes_fleet] 停止本机模型失败:\n{_tb()}")
+            return self._fail("停止失败，详见插件日志", 500)
+        return json_response(data)
+
+    async def local_vector_restart(self):
+        man = self._local()
+        if man is None:
+            return self._fail("本机向量模型组件未初始化", 500)
+        try:
+            data = await asyncio.to_thread(man.restart, 45.0)
+        except Exception:
+            logger.error(f"[hermes_fleet] 重启本机模型失败:\n{_tb()}")
+            return self._fail("重启失败，详见插件日志", 500)
+        return json_response(data)
+
+    async def local_vector_logs(self):
+        man = self._local()
+        if man is None:
+            return self._fail("本机向量模型组件未初始化", 500)
+        try:
+            after = int(request.query.get("after") or 0)
+        except (TypeError, ValueError):
+            after = 0
+        try:
+            limit = int(request.query.get("limit") or 400)
+        except (TypeError, ValueError):
+            limit = 400
+        lines = man.logs(after=max(0, after), limit=max(1, min(800, limit)))
+        return json_response({
+            "lines": lines,
+            "seq": lines[-1]["seq"] if lines else after,
+        })
+
     async def probe(self):
         from hermes_fleet.console import merge_probe
-
         body = await self._body()
         ids = body.get("platform_ids")
         if not isinstance(ids, list):
